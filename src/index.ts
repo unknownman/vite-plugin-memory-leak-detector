@@ -15,6 +15,9 @@ export type {
   CommentDirectivesConfig,
   Severity,
   RuleSeverityConfig,
+  IgnoreRule,
+  IgnoreConfig,
+  AllowlistConfig,
 } from './types/config.js';
 
 export type {
@@ -34,6 +37,7 @@ export { LeakDetectorEngine } from './core/engine.js';
 export { resolvePluginConfig } from './config/index.js';
 export { BaselineManager, generateFingerprint } from './core/baseline.js';
 export { CommentDirectivesHandler } from './core/comments.js';
+export { IgnoreManager } from './core/ignore.js';
 export { builtinRules } from './rules/index.js';
 export { noUnclearedTimersRule } from './rules/generic/no-uncleared-timers.js';
 export { noUnregisteredListenersRule } from './rules/generic/no-unregistered-listeners.js';

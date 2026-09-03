@@ -13,6 +13,10 @@ export interface RuleContext {
   code: string;
   ast: Node;
   report(diag: Omit<Diagnostic, 'file' | 'severity' | 'fingerprint'> & { severity?: Severity }): void;
+  /**
+   * Checks if a specific function or method name is globally allowlisted by the user.
+   */
+  isAllowlisted(name: string, type: 'function' | 'method'): boolean;
 }
 
 export type RuleVisitor = {

@@ -12,12 +12,14 @@ export const noUnregisteredListenersRule: RuleDefinition = {
 
     return {
       CallExpression(node: any) {
-        if (
-          node.callee.type === 'MemberExpression' &&
-          node.callee.property.type === 'Identifier'
-        ) {
-          const method = node.callee.property.name;
-          const target = node.callee.object.type === 'Identifier' ? node.callee.object.name : 'Element';
+        const callee = node.callee;
+        if (callee.type === 'MemberExpression' && callee.property.type === 'Identifier') {
+          const method = callee.property.name;
+
+          // Skip tracking if the method is user-allowlisted
+          if (context.isAllowlisted(method, 'method')) return;
+
+          const target = callee.object.type === 'Identifier' ? callee.object.name : 'Element';
           const arg = node.arguments[0];
           const event = arg && arg.type === 'Literal' ? String(arg.value) : '*';
 

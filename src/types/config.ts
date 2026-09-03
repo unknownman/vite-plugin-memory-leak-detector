@@ -58,14 +58,34 @@ export interface CommentDirectivesConfig {
 
   /**
    * Custom directive prefix.
-   * Example: 'vite-leak' supports `// vite-leak-disable-next-line`
-   * @default 'vite-leak'
+   * Example: 'memory-leak' supports `// memory-leak-ignore-next-line`
+   * @default 'memory-leak'
    */
   prefix?: string;
 }
 
 export interface RuleSeverityConfig {
   [ruleId: string]: Severity | { severity: Severity; options?: Record<string, unknown> };
+}
+
+export interface IgnoreRule {
+  /** Glob pattern(s) to match against file paths (e.g., '**\\/*.test.ts') */
+  glob: string | string[];
+  /** Rules to ignore for these files. If omitted, ignores ALL rules. */
+  rules?: string[];
+}
+
+export type IgnoreConfig = Array<string | IgnoreRule>;
+
+export interface AllowlistConfig {
+  /**
+   * Global function names to ignore (e.g., ['useInterval', 'customSetTimeout'])
+   */
+  functions?: string[];
+  /**
+   * Object method names to ignore (e.g., ['onCustomEvent', 'subscribeSafe'])
+   */
+  methods?: string[];
 }
 
 export interface PluginOptions {
@@ -105,6 +125,16 @@ export interface PluginOptions {
    * Per-rule severity overrides.
    */
   rules?: RuleSeverityConfig;
+
+  /**
+   * Advanced glob-based ignore system for files and specific rules.
+   */
+  ignores?: IgnoreConfig;
+
+  /**
+   * Allowlist specific function and method names that handle their own memory cleanup.
+   */
+  allowlist?: AllowlistConfig;
 
   /**
    * Custom detection rules.
@@ -154,6 +184,8 @@ export interface ResolvedPluginConfig {
   exclude: FilterPattern;
   rules: RuleSeverityConfig;
   customRules: RuleDefinition[];
+  ignores: IgnoreConfig;
+  allowlist: Required<AllowlistConfig>;
   comments: Required<CommentDirectivesConfig>;
   baseline: {
     enabled: boolean;

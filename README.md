@@ -54,9 +54,12 @@ export default defineConfig({
 | `include` | `FilterPattern` | `/\.[jt]sx?$\|\.vue$\|\.svelte$/` | Files to analyze. |
 | `exclude` | `FilterPattern` | `/node_modules/` | Files to ignore. |
 | `rules` | `RuleSeverityConfig` | `{}` | Per-rule severity overrides (`'error' \| 'warn' \| 'info' \| 'off'`). |
+| `ignores` | `IgnoreConfig` | `[]` | Advanced glob-based ignore system for files and specific rules. |
+| `allowlist.functions` | `string[]` | `[]` | Function names to skip (e.g., hooks that auto-clean their own timers). |
+| `allowlist.methods` | `string[]` | `[]` | Object method names to skip (e.g., safe wrappers that clean up internally). |
 | `customRules` | `RuleDefinition[]` | `[]` | Custom rules to extend detection capabilities. |
 | `comments.enabled` | `boolean` | `true` | Enable inline suppression comments. |
-| `comments.prefix` | `string` | `'vite-leak'` | Directive prefix. |
+| `comments.prefix` | `string` | `'memory-leak'` | Directive prefix. |
 | `baseline` | `string \| BaselineConfig` | `undefined` | Baseline file path or config to ignore known issues. |
 | `reports` | `ReportFormat \| (ReportFormat \| ReportDestination)[]` | `'stylish'` | Report formats/destinations: `'stylish'`, `'json'`, `'sarif'`, `'html'`, `'markdown'`. |
 | `outputDir` | `string` | `'.leak-reports'` | Directory for file-based reports. |
@@ -83,26 +86,75 @@ memoryLeakDetector({
 
 ## Inline Comment Directives
 
-Suppress diagnostics inline using comments. The default prefix is `vite-leak`.
+Suppress diagnostics inline using comments. The default prefix is `memory-leak`.
 
 ```typescript
-// vite-leak-disable-next-line generic/no-uncleared-timers
+// memory-leak-ignore-next-line generic/no-uncleared-timers
 const timer = setInterval(() => {}, 1000);
 
-window.addEventListener('click', h); // vite-leak-disable-line
+window.addEventListener('click', h); // memory-leak-ignore-line
 
-/* vite-leak-disable */
-const a = setTimeout(() => {}, 1000);
-/* vite-leak-enable */
+// memory-leak-ignore (ignores the entire file)
+setInterval(() => {}, 1000);
 
-// vite-leak-disable-title-case (disables entire file)
+/* memory-leak-ignore-start */
+window.addEventListener('click', h);
+/* memory-leak-ignore-end */
+```
+
+Each directive can optionally target specific rules (comma or space separated). An omitted rule list ignores **all** rules.
+
+```typescript
+// memory-leak-ignore-next-line generic/no-uncleared-timers, generic/no-unregistered-listeners
+const timer = setInterval(() => {}, 1000);
+
+/* memory-leak-ignore-start generic/no-unregistered-listeners */
+window.addEventListener('click', h);
+/* memory-leak-ignore-end */
 ```
 
 Customize the prefix:
 
 ```typescript
 memoryLeakDetector({ comments: { prefix: 'myleak' } });
-// now supports: // myleak-disable-next-line ...
+// now supports: // myleak-ignore-next-line ...
+```
+
+## Ignore & Allowlist
+
+Control detection with a multi-layered filtering system.
+
+### Glob-based file/rule ignores
+
+Skip entire files, or specific rules for specific files, using glob patterns. Because Vite passes absolute paths to the analyzer, prefix patterns with `**/` to match files reliably.
+
+```typescript
+memoryLeakDetector({
+  ignores: [
+    // Skip test directories entirely (all rules)
+    '**/*.test.{ts,tsx}',
+    '**/*.spec.{ts,tsx}',
+    // Skip specific rules for legacy code
+    { glob: '**/src/legacy/**/*.js', rules: ['generic/no-unregistered-listeners'] },
+    // Skip multiple rules for multiple globs
+    { glob: ['**/dist/**', '**/generated/**'], rules: ['generic/no-unsubscribed-events'] },
+  ],
+});
+```
+
+### Function / method allowlist
+
+Bypass detection for functions and methods that are known to clean up after themselves (e.g., your own hook that wraps `setInterval` and clears it on unmount).
+
+```typescript
+memoryLeakDetector({
+  allowlist: {
+    // Ignore global function names
+    functions: ['useInterval'],
+    // Ignore object method names (e.g., safe wrappers)
+    methods: ['subscribeSafe', 'onCustomEvent'],
+  },
+});
 ```
 
 ## Baselines
@@ -216,6 +268,7 @@ src/
 │   ├── engine.ts             # LeakDetector orchestration engine (estree-walker single-pass)
 │   ├── parser.ts             # OXC `parseSync` wrapper + ESTree normalization
 │   ├── comments.ts           # Inline suppression directives
+│   ├── ignore.ts             # Glob-based file/rule ignores (picomatch)
 │   ├── baseline.ts           # Baseline manager + fingerprinting
 │   └── extractors/           # SFC source extractors
 │       ├── index.ts          # Extractor dispatcher

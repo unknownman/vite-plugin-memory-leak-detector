@@ -47,6 +47,11 @@ export function resolvePluginConfig(userOptions: PluginOptions = {}): ResolvedPl
     exclude: userOptions.exclude ?? DEFAULT_CONFIG.exclude,
     rules: userOptions.rules ?? {},
     customRules: userOptions.customRules ?? [],
+    ignores: userOptions.ignores ?? [],
+    allowlist: {
+      functions: userOptions.allowlist?.functions ?? [],
+      methods: userOptions.allowlist?.methods ?? [],
+    },
     comments: {
       enabled: userOptions.comments?.enabled ?? DEFAULT_CONFIG.comments.enabled,
       prefix: userOptions.comments?.prefix ?? DEFAULT_CONFIG.comments.prefix,

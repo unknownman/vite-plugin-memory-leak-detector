@@ -5,10 +5,12 @@ import type { Severity, ResolvedPluginConfig } from '../types/config.js';
 import { parseCode } from './parser.js';
 import { CommentDirectivesHandler } from './comments.js';
 import { BaselineManager, generateFingerprint } from './baseline.js';
+import { IgnoreManager } from './ignore.js';
 
 export class LeakDetectorEngine {
   private config: ResolvedPluginConfig;
   private commentHandler: CommentDirectivesHandler;
+  private ignoreManager: IgnoreManager;
   private baselineManager?: BaselineManager;
   private rules: RuleDefinition[];
 
@@ -18,6 +20,8 @@ export class LeakDetectorEngine {
       config.comments.prefix,
       config.comments.enabled
     );
+    this.ignoreManager = new IgnoreManager(config.ignores);
+
     if (config.baseline.enabled) {
       this.baselineManager = new BaselineManager(config.baseline.path);
     }
@@ -25,9 +29,14 @@ export class LeakDetectorEngine {
   }
 
   public analyze(file: string, code: string, extraction?: ExtractionResult): Diagnostic[] {
-    const scriptCode = extraction ? extraction.code : code;
     const diagnostics: Diagnostic[] = [];
 
+    // 1. FAST PATH: Check Glob-based global ignores
+    if (this.ignoreManager.isFileGloballyIgnored(file)) {
+      return diagnostics;
+    }
+
+    const scriptCode = extraction ? extraction.code : code;
     if (scriptCode.trim() === '') return diagnostics;
 
     const { ast, errors } = parseCode(scriptCode, file);
@@ -43,17 +52,30 @@ export class LeakDetectorEngine {
       ? { lineOffset: extraction.lineOffset, columnOffset: extraction.columnOffset }
       : { lineOffset: 0, columnOffset: 0 };
 
+    // Allowlist closure
+    const isAllowlisted = (name: string, type: 'function' | 'method'): boolean => {
+      if (type === 'function') {
+        return this.config.allowlist.functions.includes(name);
+      }
+      return this.config.allowlist.methods.includes(name);
+    };
+
     const context: RuleContext = {
       file,
       code: scriptCode,
       ast,
+      isAllowlisted,
       report: (diag) => {
+        // 2. GLOB PATTERN RULE FILTERING
+        if (this.ignoreManager.isRuleIgnoredForFile(file, diag.ruleId)) return;
+
         const severity = diag.severity || this.resolveSeverity(diag.ruleId);
         if (severity === 'off') return;
 
         const actualLine = (diag.line ?? 1) + offset.lineOffset;
         const actualCol = (diag.column ?? 0) + ((diag.line ?? 1) === 1 ? offset.columnOffset : 0);
 
+        // 3. INLINE COMMENT SUPPRESSION
         if (this.commentHandler.isSuppressed(diag.ruleId, actualLine, directives)) {
           return;
         }
@@ -70,6 +92,7 @@ export class LeakDetectorEngine {
 
         diagnostic.fingerprint = generateFingerprint(diagnostic);
 
+        // 4. BASELINE SUPPRESSION
         if (this.baselineManager && !this.config.baseline.update) {
           if (this.baselineManager.isBaseline(diagnostic)) return;
         }
@@ -84,7 +107,7 @@ export class LeakDetectorEngine {
       if (
         this.config.frameworks !== 'auto' &&
         rule.category !== 'generic' &&
-        !this.config.frameworks.includes(rule.category)
+        !this.config.frameworks.includes(rule.category as any)
       ) {
         continue;
       }

@@ -1,5 +1,5 @@
 export interface SuppressionDirective {
-  type: 'disable-file' | 'disable-next-line' | 'disable-line' | 'block-disable' | 'block-enable';
+  type: 'ignore-file' | 'ignore-next-line' | 'ignore-line' | 'ignore-start' | 'ignore-end';
   rules: string[]; // empty array means all rules
   line: number;
 }
@@ -8,7 +8,7 @@ export class CommentDirectivesHandler {
   private prefix: string;
   private enabled: boolean;
 
-  constructor(prefix = 'vite-leak', enabled = true) {
+  constructor(prefix = 'memory-leak', enabled = true) {
     this.prefix = prefix;
     this.enabled = enabled;
   }
@@ -19,34 +19,36 @@ export class CommentDirectivesHandler {
     const directives: SuppressionDirective[] = [];
     const lines = code.split('\n');
 
+    // Matches: // memory-leak-ignore-next-line rule1, rule2
     const singleLinePattern = new RegExp(
-      `//\\s*${this.prefix}-(disable-next-line|disable-line|disable)(.*)$`
+      `//\\s*${this.prefix}-(ignore-next-line|ignore-line|ignore)(.*)$`
     );
+    // Matches: /* memory-leak-ignore-start rule1 */
     const blockPattern = new RegExp(
-      `/\\*\\s*${this.prefix}-(disable|enable)(?:\\s+([^*]+))?\\s*\\*/`,
+      `/\\*\\s*${this.prefix}-(ignore-start|ignore-end)(?:\\s+([^*]+))?\\s*\\*/`,
       'g'
     );
 
     lines.forEach((lineText, idx) => {
       const lineNum = idx + 1;
 
-      // Check single line comments
+      // Single line check
       const singleMatch = lineText.match(singleLinePattern);
       if (singleMatch) {
         const action = singleMatch[1];
         const rawRules = singleMatch[2]?.trim() || '';
         const rules = rawRules ? rawRules.split(/[\s,]+/).map((r) => r.trim()).filter(Boolean) : [];
 
-        if (action === 'disable-next-line') {
-          directives.push({ type: 'disable-next-line', rules, line: lineNum });
-        } else if (action === 'disable-line') {
-          directives.push({ type: 'disable-line', rules, line: lineNum });
-        } else if (action === 'disable') {
-          directives.push({ type: 'disable-file', rules, line: lineNum });
+        if (action === 'ignore-next-line') {
+          directives.push({ type: 'ignore-next-line', rules, line: lineNum });
+        } else if (action === 'ignore-line') {
+          directives.push({ type: 'ignore-line', rules, line: lineNum });
+        } else if (action === 'ignore') {
+          directives.push({ type: 'ignore-file', rules, line: lineNum });
         }
       }
 
-      // Check block comments
+      // Block comment check
       let blockMatch: RegExpExecArray | null;
       while ((blockMatch = blockPattern.exec(lineText)) !== null) {
         const action = blockMatch[1];
@@ -54,7 +56,7 @@ export class CommentDirectivesHandler {
         const rules = rawRules ? rawRules.split(/[\s,]+/).map((r) => r.trim()).filter(Boolean) : [];
 
         directives.push({
-          type: action === 'disable' ? 'block-disable' : 'block-enable',
+          type: action === 'ignore-start' ? 'ignore-start' : 'ignore-end',
           rules,
           line: lineNum,
         });
@@ -67,41 +69,30 @@ export class CommentDirectivesHandler {
   public isSuppressed(ruleId: string, line: number, directives: SuppressionDirective[]): boolean {
     if (!this.enabled || directives.length === 0) return false;
 
-    let inBlockDisable = false;
+    let inBlockIgnore = false;
     let blockRules: string[] = [];
 
     for (const dir of directives) {
       const matchesRule = dir.rules.length === 0 || dir.rules.includes(ruleId);
 
-      // Whole file suppression
-      if (dir.type === 'disable-file' && matchesRule) {
-        return true;
-      }
+      if (dir.type === 'ignore-file' && matchesRule) return true;
+      if (dir.type === 'ignore-next-line' && dir.line + 1 === line && matchesRule) return true;
+      if (dir.type === 'ignore-line' && dir.line === line && matchesRule) return true;
 
-      // Next line suppression
-      if (dir.type === 'disable-next-line' && dir.line + 1 === line && matchesRule) {
-        return true;
-      }
-
-      // Current line suppression
-      if (dir.type === 'disable-line' && dir.line === line && matchesRule) {
-        return true;
-      }
-
-      // Block-range tracking
+      // Track block start/end line by line
       if (dir.line <= line) {
-        if (dir.type === 'block-disable') {
-          inBlockDisable = true;
+        if (dir.type === 'ignore-start') {
+          inBlockIgnore = true;
           blockRules = dir.rules;
-        } else if (dir.type === 'block-enable') {
+        } else if (dir.type === 'ignore-end') {
           if (dir.rules.length === 0 || dir.rules.includes(ruleId)) {
-            inBlockDisable = false;
+            inBlockIgnore = false;
           }
         }
       }
     }
 
-    if (inBlockDisable && (blockRules.length === 0 || blockRules.includes(ruleId))) {
+    if (inBlockIgnore && (blockRules.length === 0 || blockRules.includes(ruleId))) {
       return true;
     }
 

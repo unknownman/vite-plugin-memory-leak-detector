@@ -12,9 +12,14 @@ export const DEFAULT_CONFIG: ResolvedPluginConfig = {
   exclude: /node_modules/,
   rules: {},
   customRules: [],
+  ignores: [],
+  allowlist: {
+    functions: [],
+    methods: [],
+  },
   comments: {
     enabled: true,
-    prefix: 'vite-leak',
+    prefix: 'memory-leak',
   },
   baseline: {
     enabled: false,
