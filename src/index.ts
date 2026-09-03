@@ -26,6 +26,7 @@ export type {
 export type {
   RuleContext,
   RuleDefinition,
+  RuleVisitor,
   ExtractionResult,
 } from './types/rule.js';
 
@@ -36,4 +37,6 @@ export { CommentDirectivesHandler } from './core/comments.js';
 export { builtinRules } from './rules/index.js';
 export { noUnclearedTimersRule } from './rules/generic/no-uncleared-timers.js';
 export { noUnregisteredListenersRule } from './rules/generic/no-unregistered-listeners.js';
+export { noUnconnectedObserversRule } from './rules/generic/no-unconnected-observers.js';
+export { noUnsubscribedEventsRule } from './rules/generic/no-unsubscribed-events.js';
 export { reactUseEffectCleanupRule } from './rules/react/react-useeffect-cleanup.js';

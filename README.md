@@ -3,7 +3,7 @@
 A Vite plugin that detects potential memory leaks in your frontend code at build time using AST-based static analysis.
 
 ## Features
-- 🚀 **Fast**: Runs efficiently during the Vite transform phase using a Babel AST.
+- 🚀 **Fast**: Runs efficiently during the Vite transform phase using the OXC Rust parser (ESTree AST).
 - 🧩 **Extensible**: Pluggable rule system with generic and framework-specific rules (React, Vue, Svelte, Solid).
 - 🛡 **Type Safe**: Fully written in strict TypeScript.
 - 🔍 **SFC Aware**: Extracts `<script>` / `<script setup>` blocks from Vue `.vue` and Svelte `.svelte` files with accurate line/column reporting.
@@ -145,6 +145,8 @@ Supported formats: `'stylish'` (terminal), `'default'` (terminal), `'json'`, `'s
 |---|---|---|---|
 | `generic/no-uncleared-timers` | generic | `warn` | Detects `setInterval` / `setTimeout` calls whose timer handle is never cleared. |
 | `generic/no-unregistered-listeners` | generic | `warn` | Detects `addEventListener` calls without a matching `removeEventListener`. |
+| `generic/no-unconnected-observers` | generic | `warn` | Detects `IntersectionObserver` / `MutationObserver` / `ResizeObserver` instances that are created but never disconnected. |
+| `generic/no-unsubscribed-events` | generic | `warn` | Detects reactive subscriptions via `.subscribe()` / `.on()` without a matching `.unsubscribe()` / `.off()`. |
 | `react/react-useeffect-cleanup` | react | `error` | Detects `useEffect` / `useLayoutEffect` callbacks that create subscriptions, timers, or listeners without returning a cleanup function. |
 
 ## Severity Overrides
@@ -161,7 +163,7 @@ memoryLeakDetector({
 
 ## Writing Custom Rules
 
-Custom rules are plain objects with a `create(context)` method that returns a Babel `Visitor`. Use `context.report(...)` to emit diagnostics.
+Custom rules are plain objects with a `create(context)` method that returns an ESTree visitor. Each handler receives the AST `node` and its `parent`. Use `context.report(...)` to emit diagnostics.
 
 ```typescript
 import { defineConfig } from 'vite';
@@ -174,20 +176,17 @@ const unsubscribedRxJsRule: RuleDefinition = {
   defaultSeverity: 'warn',
   create(context) {
     return {
-      CallExpression(path) {
-        const callee = path.node.callee;
-        if (callee.type === 'MemberExpression') {
-          const hasUnsubscribeInFile = context.code.includes('.unsubscribe(');
-          if (!hasUnsubscribeInFile) {
-            context.report({
-              ruleId: 'generic/unsubscribed-rxjs',
-              message: 'RxJS subscription created without unsubscribing.',
-              suggestion: 'Store the subscription and call unsubscribe on unmount.',
-              severity: 'warn',
-              line: path.node.loc?.start.line ?? 1,
-              column: path.node.loc?.start.column ?? 0,
-            });
-          }
+      CallExpression(node) {
+        const callee = node.callee;
+        if (callee.type === 'MemberExpression' && callee.property.name === 'subscribe') {
+          context.report({
+            ruleId: 'generic/unsubscribed-rxjs',
+            message: 'RxJS subscription created without unsubscribing.',
+            suggestion: 'Store the subscription and call unsubscribe on unmount.',
+            severity: 'warn',
+            line: node.loc?.start.line ?? 1,
+            column: node.loc?.start.column ?? 0,
+          });
         }
       },
     };
@@ -214,8 +213,8 @@ src/
 │   ├── diagnostic.ts         # Diagnostic, SourceLocation, CodeFrame
 │   └── rule.ts               # RuleDefinition, RuleContext, ExtractionResult
 ├── core/
-│   ├── engine.ts             # LeakDetector orchestration engine
-│   ├── parser.ts             # @babel/parser wrapper
+│   ├── engine.ts             # LeakDetector orchestration engine (estree-walker single-pass)
+│   ├── parser.ts             # OXC `parseSync` wrapper + ESTree normalization
 │   ├── comments.ts           # Inline suppression directives
 │   ├── baseline.ts           # Baseline manager + fingerprinting
 │   └── extractors/           # SFC source extractors
@@ -234,10 +233,19 @@ src/
     ├── index.ts              # Rule registry
     ├── generic/
     │   ├── no-uncleared-timers.ts
-    │   └── no-unregistered-listeners.ts
+    │   ├── no-unregistered-listeners.ts
+    │   ├── no-unconnected-observers.ts
+    │   └── no-unsubscribed-events.ts
     └── react/
         └── react-useeffect-cleanup.ts
 ```
+
+## Dependencies
+
+- [`oxc-parser`](https://www.npmjs.com/package/oxc-parser) — Rust-powered JavaScript/TypeScript parser producing an ESTree AST.
+- [`estree-walker`](https://www.npmjs.com/package/estree-walker) — lightweight ESTree AST traversal used by the engine.
+- [`@rollup/pluginutils`](https://www.npmjs.com/package/@rollup/pluginutils) — file include/exclude filtering.
+- [`picocolors`](https://www.npmjs.com/package/picocolors) — terminal styling for stylish console reports.
 
 ## Development
 

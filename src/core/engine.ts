@@ -1,18 +1,10 @@
-import traverseModule, { type TraverseOptions } from '@babel/traverse';
-import type { Node } from '@babel/types';
+import { walk } from 'estree-walker';
 import type { Diagnostic } from '../types/diagnostic.js';
-import type { RuleContext, RuleDefinition, ExtractionResult } from '../types/rule.js';
+import type { RuleContext, RuleDefinition, ExtractionResult, RuleVisitor } from '../types/rule.js';
 import type { Severity, ResolvedPluginConfig } from '../types/config.js';
 import { parseCode } from './parser.js';
 import { CommentDirectivesHandler } from './comments.js';
 import { BaselineManager, generateFingerprint } from './baseline.js';
-
-// @babel/traverse ships a CommonJS module. Depending on the module system
-// in use, the default import may be the module namespace object rather than
-// the traversal function itself. Normalize to the callable.
-const traverse =
-  (traverseModule as unknown as { default?: typeof traverseModule }).default ??
-  (traverseModule as unknown as typeof traverseModule);
 
 export class LeakDetectorEngine {
   private config: ResolvedPluginConfig;
@@ -38,7 +30,7 @@ export class LeakDetectorEngine {
 
     if (scriptCode.trim() === '') return diagnostics;
 
-    const { ast, errors } = parseCode(scriptCode);
+    const { ast, errors } = parseCode(scriptCode, file);
     if (!ast || errors.length > 0) {
       if (this.config.verbose) {
         console.error(`[MemoryLeakDetector] Failed to parse ${file}:`, errors[0]?.message);
@@ -56,13 +48,12 @@ export class LeakDetectorEngine {
       code: scriptCode,
       ast,
       report: (diag) => {
-        const severity = this.resolveSeverity(diag.ruleId);
+        const severity = diag.severity || this.resolveSeverity(diag.ruleId);
         if (severity === 'off') return;
 
-        const actualLine = diag.line + offset.lineOffset;
-        const actualCol = diag.column + (diag.line === 1 ? offset.columnOffset : 0);
+        const actualLine = (diag.line ?? 1) + offset.lineOffset;
+        const actualCol = (diag.column ?? 0) + ((diag.line ?? 1) === 1 ? offset.columnOffset : 0);
 
-        // Check if suppressed via inline comment
         if (this.commentHandler.isSuppressed(diag.ruleId, actualLine, directives)) {
           return;
         }
@@ -79,19 +70,17 @@ export class LeakDetectorEngine {
 
         diagnostic.fingerprint = generateFingerprint(diagnostic);
 
-        // Check if filtered by baseline
         if (this.baselineManager && !this.config.baseline.update) {
-          if (this.baselineManager.isBaseline(diagnostic)) {
-            return;
-          }
+          if (this.baselineManager.isBaseline(diagnostic)) return;
         }
 
         diagnostics.push(diagnostic);
       },
     };
 
+    // Instantiate rule visitors
+    const activeVisitors: { id: string; visitor: RuleVisitor }[] = [];
     for (const rule of this.rules) {
-      // Check framework filtering
       if (
         this.config.frameworks !== 'auto' &&
         rule.category !== 'generic' &&
@@ -99,18 +88,35 @@ export class LeakDetectorEngine {
       ) {
         continue;
       }
-
       if (this.resolveSeverity(rule.id) === 'off') continue;
 
       try {
-        const visitor = rule.create(context);
-        traverse(ast as never, visitor as TraverseOptions);
+        activeVisitors.push({ id: rule.id, visitor: rule.create(context) });
       } catch (error) {
         if (this.config.verbose) {
-          console.error(`[MemoryLeakDetector] Error running rule '${rule.id}':`, error);
+          console.error(`[MemoryLeakDetector] Error initializing rule '${rule.id}':`, error);
         }
       }
     }
+
+    if (activeVisitors.length === 0) return diagnostics;
+
+    // Single-pass AST Traversal
+    walk(ast, {
+      enter(node: any, parent: any) {
+        for (const { visitor } of activeVisitors) {
+          const handler = visitor[node.type];
+          if (handler) handler(node, parent);
+        }
+      },
+      leave(node: any, parent: any) {
+        const exitKey = `${node.type}:exit`;
+        for (const { visitor } of activeVisitors) {
+          const handler = visitor[exitKey];
+          if (handler) handler(node, parent);
+        }
+      },
+    });
 
     return diagnostics;
   }
