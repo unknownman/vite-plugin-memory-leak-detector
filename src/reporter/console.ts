@@ -4,6 +4,7 @@ import type { Diagnostic } from '../types/diagnostic.js';
 const SEVERITY_COLORS: Record<Diagnostic['severity'], (s: string) => string> = {
   error: pc.red,
   warn: pc.yellow,
+  info: pc.cyan,
   off: pc.dim,
 };
 
@@ -64,10 +65,12 @@ export function consoleReporter(diagnostics: Diagnostic[], sourceCode?: string, 
 
   const errorCount = diagnostics.filter((d) => d.severity === 'error').length;
   const warnCount = diagnostics.filter((d) => d.severity === 'warn').length;
+  const infoCount = diagnostics.filter((d) => d.severity === 'info').length;
 
   const parts: string[] = [];
   if (errorCount > 0) parts.push(pc.red(`${errorCount} errors`));
   if (warnCount > 0) parts.push(pc.yellow(`${warnCount} warnings`));
+  if (infoCount > 0) parts.push(pc.cyan(`${infoCount} infos`));
   if (parts.length > 0) {
     console.log(`\n  ${pc.bold(`✖ ${parts.join(', ')}`)}`);
   }

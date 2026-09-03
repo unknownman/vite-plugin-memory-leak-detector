@@ -16,7 +16,9 @@ export function rollupReporter(
   failOnError: boolean
 ): void {
   const errors = diagnostics.filter((d) => d.severity === 'error');
-  const warnings = diagnostics.filter((d) => d.severity === 'warn');
+  // Rollup/Vite only exposes warn and error levels, so gate 'warn' and 'info'
+  // diagnostics through the warning channel.
+  const warnings = diagnostics.filter((d) => d.severity === 'warn' || d.severity === 'info');
 
   for (const warning of warnings) {
     const message = buildMessage(warning);

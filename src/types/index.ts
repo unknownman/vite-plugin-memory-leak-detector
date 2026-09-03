@@ -1,4 +1,16 @@
-export type { Severity, ReporterType, RuleSeverityConfig, PluginOptions } from './config.js';
+export type {
+  Severity,
+  PluginMode,
+  FrameworkType,
+  ReportFormat,
+  ReportDestination,
+  ThresholdConfig,
+  BaselineConfig,
+  CommentDirectivesConfig,
+  RuleSeverityConfig,
+  PluginOptions,
+  ResolvedPluginConfig,
+} from './config.js';
 export type {
   SourceLocation,
   CodeFrame,

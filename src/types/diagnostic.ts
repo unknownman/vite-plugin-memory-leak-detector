@@ -27,4 +27,6 @@ export interface Diagnostic {
   endLine?: number;
   endColumn?: number;
   codeFrame?: CodeFrame;
+  /** Unique deterministic fingerprint for baseline tracking */
+  fingerprint?: string;
 }
