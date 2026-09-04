@@ -6,9 +6,13 @@ export function generateHtmlReport(diagnostics: Diagnostic[]): string {
   const warnings = diagnostics.filter((d) => d.severity === 'warn').length;
   const total = diagnostics.length;
 
+  const cwd = process.cwd();
+
   const rowHtml = diagnostics
     .map((d) => {
-      const relativeFile = path.relative(process.cwd(), d.file);
+      const relativeFile = path.relative(cwd, d.file).replace(/\\/g, '/');
+      const vscodeLink = `vscode://file/${encodeURIComponent(d.file)}:${d.line}:${d.column}`;
+
       return `
       <tr class="issue-row severity-${d.severity}" data-severity="${d.severity}" data-rule="${d.ruleId}">
         <td class="px-4 py-3">
@@ -16,12 +20,13 @@ export function generateHtmlReport(diagnostics: Diagnostic[]): string {
         </td>
         <td class="px-4 py-3 font-mono text-sm text-gray-700">${d.ruleId}</td>
         <td class="px-4 py-3 font-mono text-sm">
-          <div class="text-blue-600 break-all">${relativeFile}</div>
-          <div class="text-gray-500 text-xs mt-1">Line: ${d.line}:${d.column}</div>
+          <a href="${vscodeLink}" class="file-link" title="Open in VS Code">
+            ${relativeFile}:${d.line}:${d.column}
+          </a>
         </td>
         <td class="px-4 py-3">
           <div class="font-medium text-gray-900">${d.message}</div>
-          ${d.suggestion ? `<div class="mt-2 text-sm text-green-700 bg-green-50 p-2 rounded border border-green-200">💡 <strong>Suggestion:</strong> ${d.suggestion}</div>` : ''}
+          ${d.suggestion ? `<div class="suggestion-box">💡 <strong>Suggestion:</strong> ${d.suggestion}</div>` : ''}
         </td>
       </tr>
     `;
@@ -37,7 +42,7 @@ export function generateHtmlReport(diagnostics: Diagnostic[]): string {
   <style>
     :root { --error: #ef4444; --error-bg: #fef2f2; --warn: #f59e0b; --warn-bg: #fffbeb; }
     body { font-family: system-ui, -apple-system, sans-serif; background-color: #f3f4f6; margin: 0; padding: 2rem; color: #1f2937; }
-    .container { max-width: 1200px; margin: 0 auto; background: white; border-radius: 8px; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1); overflow: hidden; }
+    .container { max-width: 1400px; margin: 0 auto; background: white; border-radius: 8px; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1); overflow: hidden; }
     .header { padding: 1.5rem 2rem; border-bottom: 1px solid #e5e7eb; background: #fff; }
     .header h1 { margin: 0 0 1rem 0; font-size: 1.5rem; color: #111827; }
     .stats { display: flex; gap: 1rem; }
@@ -57,6 +62,9 @@ export function generateHtmlReport(diagnostics: Diagnostic[]): string {
     .badge-warn { background: var(--warn); color: white; }
     .hidden { display: none !important; }
     .font-mono { font-family: ui-monospace, SFMono-Regular, monospace; }
+    .file-link { color: #2563eb; text-decoration: none; word-break: break-all; }
+    .file-link:hover { text-decoration: underline; color: #1d4ed8; }
+    .suggestion-box { margin-top: 0.5rem; font-size: 0.875rem; color: #166534; background: #f0fdf4; padding: 0.5rem; border-radius: 4px; border: 1px solid #bbf7d0; }
   </style>
 </head>
 <body>
@@ -65,8 +73,8 @@ export function generateHtmlReport(diagnostics: Diagnostic[]): string {
       <h1>Memory Leak Detection Report</h1>
       <div class="stats">
         <div class="stat-card total"><div class="stat-num">${total}</div><div class="text-sm">Total Issues</div></div>
-        <div class="stat-card errors"><div class="stat-num text-red-600">${errors}</div><div class="text-sm">Errors</div></div>
-        <div class="stat-card warnings"><div class="stat-num text-yellow-600">${warnings}</div><div class="text-sm">Warnings</div></div>
+        <div class="stat-card errors"><div class="stat-num" style="color: var(--error);">${errors}</div><div class="text-sm">Errors</div></div>
+        <div class="stat-card warnings"><div class="stat-num" style="color: var(--warn);">${warnings}</div><div class="text-sm">Warnings</div></div>
       </div>
     </div>
     
@@ -84,13 +92,13 @@ export function generateHtmlReport(diagnostics: Diagnostic[]): string {
       <thead>
         <tr>
           <th style="width: 100px;">Severity</th>
-          <th style="width: 200px;">Rule</th>
-          <th style="width: 300px;">File Location</th>
+          <th style="width: 250px;">Rule</th>
+          <th style="width: 350px;">File Location</th>
           <th>Details</th>
         </tr>
       </thead>
       <tbody id="issueTableBody">
-        ${rowHtml || `<tr><td colspan="4" style="text-align: center; padding: 2rem; color: #6b7280;">No memory leaks detected! 🎉</td></tr>`}
+        ${rowHtml || `<tr><td colspan="4" style="text-align: center; padding: 3rem; color: #6b7280; font-size: 1.1rem;">No memory leaks detected! 🎉</td></tr>`}
       </tbody>
     </table>
   </div>

@@ -1,3 +1,4 @@
+import path from 'node:path';
 import pc from 'picocolors';
 import type { Diagnostic } from '../types/diagnostic.js';
 
@@ -22,13 +23,12 @@ function formatCodeframe(code: string, diag: Diagnostic): string {
       .join('\n');
   }
 
-  // Fallback: show the offending line plus a pointer.
   const lineNo = diag.line;
   const sourceLine = codeLines[lineNo - 1];
   if (!sourceLine) return '';
 
-  const gutter = pc.dim(`${String(lineNo).padStart(4)} | `);
   const gutterPlain = `${String(lineNo).padStart(4)} | `;
+  const gutter = pc.dim(gutterPlain);
   const pointer = pc.red(' '.repeat(gutterPlain.length + diag.column) + '^');
 
   return `${gutter}${sourceLine}\n${pointer}`;
@@ -39,40 +39,52 @@ export interface ConsoleReporterOptions {
 }
 
 /**
- * Colorized terminal reporter using picocolors.
+ * Grouped, stylish terminal reporter using picocolors.
  */
 export function consoleReporter(diagnostics: Diagnostic[], sourceCode?: string, options: ConsoleReporterOptions = {}) {
   if (diagnostics.length === 0) return;
 
-  for (const diag of diagnostics) {
-    const color = SEVERITY_COLORS[diag.severity];
-    const severityLabel = color(diag.severity.toUpperCase().padEnd(5));
-    const ruleLabel = pc.cyan(diag.ruleId);
-    const location = pc.dim(`${diag.file}:${diag.line}:${diag.column}`);
+  const grouped = diagnostics.reduce(
+    (acc, diag) => {
+      (acc[diag.file] = acc[diag.file] || []).push(diag);
+      return acc;
+    },
+    {} as Record<string, Diagnostic[]>,
+  );
 
-    console.log(`\n  ${severityLabel} ${ruleLabel}  ${location}`);
-    console.log(`  ${diag.message}`);
+  const cwd = process.cwd();
 
-    if (diag.suggestion) {
-      console.log(`  ${pc.green('Suggestion:')} ${diag.suggestion}`);
-    }
+  for (const [file, diags] of Object.entries(grouped)) {
+    const relFile = path.relative(cwd, file);
+    console.log(`\n${pc.underline(pc.cyan(relFile))}`);
 
-    if (sourceCode !== undefined && options.verbose !== false) {
-      const frame = formatCodeframe(sourceCode, diag);
-      if (frame) console.log(`\n${frame}`);
+    for (const diag of diags) {
+      const color = SEVERITY_COLORS[diag.severity];
+      const severityLabel = color(diag.severity.padEnd(5));
+      const pos = pc.dim(`${diag.line}:${diag.column}`.padEnd(8));
+
+      console.log(`  ${pos} ${severityLabel} ${diag.message} ${pc.dim(diag.ruleId)}`);
+
+      if (diag.suggestion) {
+        console.log(`            ${pc.green('💡')} ${pc.italic(diag.suggestion)}`);
+      }
+
+      if (sourceCode !== undefined && options.verbose !== false) {
+        const frame = formatCodeframe(sourceCode, diag);
+        if (frame) console.log(`\n${frame}\n`);
+      }
     }
   }
 
   const errorCount = diagnostics.filter((d) => d.severity === 'error').length;
   const warnCount = diagnostics.filter((d) => d.severity === 'warn').length;
-  const infoCount = diagnostics.filter((d) => d.severity === 'info').length;
 
   const parts: string[] = [];
   if (errorCount > 0) parts.push(pc.red(`${errorCount} errors`));
   if (warnCount > 0) parts.push(pc.yellow(`${warnCount} warnings`));
-  if (infoCount > 0) parts.push(pc.cyan(`${infoCount} infos`));
+
   if (parts.length > 0) {
-    console.log(`\n  ${pc.bold(`✖ ${parts.join(', ')}`)}`);
+    console.log(`\n${pc.bold(`✖ ${parts.join(', ')}`)}`);
   }
 }
 
@@ -81,8 +93,5 @@ export function jsonReporter(diagnostics: Diagnostic[]) {
 }
 
 export function sourceForFile(_file: string, code: string): string | undefined {
-  // Diagnostics carry full-file line/column coordinates (after applying
-  // SFC line offsets), so the codeframe should be built from the original
-  // file content rather than an extracted script snippet.
   return code;
 }

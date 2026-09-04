@@ -1,4 +1,4 @@
-# vite-plugin-memory-leak-detector
+# 🛡️ vite-plugin-memory-leak-detector
 
 A powerful, AST-based Vite plugin that detects potential memory leaks in your frontend code at build time. Catch forgotten event listeners, runaway intervals, and missing component teardowns before they reach production.
 
@@ -23,23 +23,184 @@ pnpm add vite-plugin-memory-leak-detector -D
 yarn add vite-plugin-memory-leak-detector -D
 ```
 
-## Quick Start
+---
 
-Add the plugin to your `vite.config.ts`:
+## Recommended Configurations
+
+Choose the setup that best fits your team's workflow.
+
+### 1. Strict (For New/Greenfield Projects)
+Fails the build if any rule is broken. Perfect for maintaining a spotless codebase.
 
 ```typescript
-import { defineConfig } from 'vite';
+// vite.config.ts
 import memoryLeakDetector from 'vite-plugin-memory-leak-detector';
 
-export default defineConfig({
+export default {
   plugins: [
     memoryLeakDetector({
-      mode: process.env.NODE_ENV === 'production' ? 'error' : 'warn',
-      reports: ['stylish', { format: 'html', outputFile: 'dist/leak-report.html' }],
-    }),
-  ],
-});
+      mode: 'error', // Immediately fail on any detection
+    })
+  ]
+};
 ```
+
+### 2. Gradual Adoption (For Legacy Projects)
+Shows warnings in development, but fails the build in CI *only* if new memory leaks are introduced. Older leaks are grandfathered in via a baseline file.
+
+```typescript
+// vite.config.ts
+import memoryLeakDetector from 'vite-plugin-memory-leak-detector';
+
+export default {
+  plugins: [
+    memoryLeakDetector({
+      mode: process.env.CI ? 'error' : 'warn',
+      baseline: '.leak-baseline.json', // Ignore legacy issues!
+      reports: ['stylish', { format: 'html', outputFile: 'dist/leak-report.html' }]
+    })
+  ]
+};
+```
+
+### 3. CI-Only / Report-Only
+Does not affect the developer terminal or fail builds. Runs purely in CI to generate artifact reports.
+
+```typescript
+// vite.config.ts
+import memoryLeakDetector from 'vite-plugin-memory-leak-detector';
+
+export default {
+  plugins: [
+    memoryLeakDetector({
+      mode: 'report-only',
+      reports: ['sarif', 'markdown'],
+      outputDir: '.github/reports'
+    })
+  ]
+};
+```
+
+---
+
+## Migrating an Existing Large Codebase
+
+When you add this plugin to a legacy codebase, you might see hundreds of warnings. Don't panic — here is the battle-tested adoption strategy:
+
+**Step 1: Whitelist safe abstractions**
+
+Does your team use a custom `useInterval` hook that handles cleanup automatically? Add it to the allowlist so the plugin ignores it.
+
+```typescript
+memoryLeakDetector({
+  allowlist: { functions: ['useInterval', 'useEventListener'] }
+})
+```
+
+**Step 2: Ignore "safe" legacy directories**
+
+If `src/legacy-utils/` is old, stable, and rarely touched, tell the plugin to skip it.
+
+```typescript
+memoryLeakDetector({
+  ignores: ['**/src/legacy-utils/**']
+})
+```
+
+**Step 3: Generate a baseline**
+
+Run the plugin once with `update: true` to snapshot all existing leaks.
+
+```typescript
+memoryLeakDetector({
+  baseline: { path: '.leak-baseline.json', update: true }
+})
+```
+
+Run your build, then revert `update: true` back to `baseline: '.leak-baseline.json'` and commit the JSON file to Git.
+
+**Result:** Your CI will now pass perfectly. If a developer introduces a *new* memory leak, the build will fail, but the 100 legacy leaks will be completely ignored.
+
+**Step 4: Fix incrementally**
+
+Pick one rule (e.g., `generic/no-uncleared-timers`) and fix all violations in a single PR. Remove the baseline entry for that rule. Repeat weekly until the baseline is empty.
+
+---
+
+## GitHub Actions Integration (SARIF)
+
+If you use GitHub, the plugin can automatically annotate your PRs with memory leak warnings right on the lines of code.
+
+1. Update your Vite config to generate a SARIF report:
+
+```typescript
+memoryLeakDetector({ mode: 'report-only', reports: ['sarif'] })
+```
+
+2. Add this step to your GitHub Actions workflow (`.github/workflows/build.yml`):
+
+```yaml
+name: Build and Check
+on: [push, pull_request]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+
+      - name: Upload Memory Leak Report
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: .github/reports/leak-report.sarif
+          category: memory-leak-detector
+```
+
+---
+
+## FAQ
+
+### I'm getting too many false positives. What do I do?
+
+Because the plugin uses static analysis (AST), it doesn't execute your code. If you allocate a timer and pass it through 3 different files before clearing it, the plugin won't trace it across files.
+
+- **Extract into a utility**: Move the logic into an allowlisted function (`allowlist.functions: ['myCustomTimer']`).
+- **Suppress inline**: Add `// memory-leak-ignore-next-line` above the offending line.
+- **Turn off per-file**: Use `// memory-leak-ignore-file` at the top of a file.
+- **Turn off per-rule**: Set `rules: { 'generic/no-uncleared-timers': 'off' }` in the plugin config.
+
+### How do I silence a specific pattern project-wide?
+
+Set its severity to `'off'` in the `rules` config:
+
+```typescript
+memoryLeakDetector({
+  rules: { 'generic/no-unregistered-listeners': 'off' }
+})
+```
+
+### Will this slow down my Vite dev server?
+
+Almost undetectably. The plugin uses `oxc-parser` (written in Rust), the fastest JavaScript parser available. It also leverages Vite's transform cache, so only files that actually change during HMR are re-analyzed.
+
+### How does the baseline system work?
+
+The baseline stores a SHA-256 fingerprint of each known issue (derived from `ruleId + file + message`, independent of line numbers). When the plugin runs, any issue whose fingerprint is in the baseline is suppressed. If a developer introduces a *new* leak (a fingerprint not in the baseline), it's reported normally.
+
+To update the baseline: set `baseline.update: true` in your config, run a build, then commit the resulting JSON file and revert `update: true`.
+
+### Can I write custom rules?
+
+Yes. Custom rules are plain objects with a `create(context)` method that returns an ESTree visitor. See [Writing Custom Rules](#writing-custom-rules) below.
+
+---
 
 ## Detected Patterns (Rules)
 
@@ -64,211 +225,36 @@ export default defineConfig({
 | `svelte/missing-ondestroy` | `error` | Intervals/listeners in `<script>` without `onDestroy`. |
 | `solid/missing-oncleanup` | `error` | Unmanaged allocations inside components/effects without `onCleanup`. |
 
-Framework rules are auto-enabled based on file extensions, or can be explicitly configured via `frameworks: ['react', 'vue']`.
-
-## Configuration Options
-
-| Option | Type | Default | Description |
-|---|---|---|---|
-| `mode` | `'warn' \| 'error' \| 'report-only'` | `'warn'` | `'error'` fails the build on error-level diagnostics; `'report-only'` writes reports without failing. |
-| `frameworks` | `'auto' \| ('react'\|'vue'\|'svelte'\|'solid')[]` | `'auto'` | Frameworks to analyze. Generic rules always run. |
-| `thresholds.maxWarnings` | `number` | `Infinity` | Max warnings before failing the build. |
-| `thresholds.maxErrors` | `number` | `0` (error mode), `Infinity` | Max errors before failing the build. |
-| `thresholds.maxTotal` | `number` | `Infinity` | Max total diagnostics before failing the build. |
-| `include` | `FilterPattern` | `/\.[jt]sx?$\|\.vue$\|\.svelte$/` | Files to analyze. |
-| `exclude` | `FilterPattern` | `/node_modules/` | Files to ignore. |
-| `rules` | `RuleSeverityConfig` | `{}` | Per-rule severity overrides (`'error' \| 'warn' \| 'info' \| 'off'`). |
-| `ignores` | `IgnoreConfig` | `[]` | Advanced glob-based ignore system for files and specific rules. |
-| `allowlist.functions` | `string[]` | `[]` | Function names to skip (e.g., custom hooks that auto-clean). |
-| `allowlist.methods` | `string[]` | `[]` | Object method names to skip. |
-| `customRules` | `RuleDefinition[]` | `[]` | Custom rules to extend detection capabilities. |
-| `comments.enabled` | `boolean` | `true` | Enable inline suppression comments. |
-| `comments.prefix` | `string` | `'memory-leak'` | Directive prefix. |
-| `baseline` | `string \| BaselineConfig` | `undefined` | Baseline file path or config to ignore known issues. |
-| `reports` | `ReportFormat \| (ReportFormat \| ReportDestination)[]` | `'stylish'` | Report formats: `'stylish'`, `'json'`, `'sarif'`, `'html'`, `'markdown'`. |
-| `outputDir` | `string` | `'.leak-reports'` | Directory for file-based reports. |
-| `verbose` | `boolean` | `false` | Enable verbose debugging logs. |
-
-## Operating Modes
-
-```typescript
-// Fail the build on any error-level diagnostic
-memoryLeakDetector({ mode: 'error' });
-
-// Emit warnings, but fail if thresholds are exceeded
-memoryLeakDetector({
-  mode: 'warn',
-  thresholds: { maxWarnings: 100, maxErrors: 0 },
-});
-
-// Never fail, just write reports (great for CI artifact generation)
-memoryLeakDetector({
-  mode: 'report-only',
-  reports: ['json', 'sarif', 'html', 'markdown'],
-});
-```
-
-## Inline Comment Directives
-
-Suppress diagnostics inline using comments. The default prefix is `memory-leak`.
-
-```typescript
-// memory-leak-ignore-next-line generic/no-uncleared-timers
-const timer = setInterval(() => {}, 1000);
-
-window.addEventListener('click', h); // memory-leak-ignore-line
-
-// memory-leak-ignore (ignores the entire file)
-setInterval(() => {}, 1000);
-
-/* memory-leak-ignore-start */
-window.addEventListener('click', h);
-/* memory-leak-ignore-end */
-```
-
-Each directive can optionally target specific rules (comma or space separated). An omitted rule list ignores **all** rules.
-
-```typescript
-// memory-leak-ignore-next-line generic/no-uncleared-timers, generic/no-unregistered-listeners
-const timer = setInterval(() => {}, 1000);
-```
-
-Customize the prefix:
-
-```typescript
-memoryLeakDetector({ comments: { prefix: 'myleak' } });
-// now supports: // myleak-ignore-next-line ...
-```
-
-## Ignore & Allowlist
-
-### Glob-based file/rule ignores
-
-Skip entire files, or specific rules for specific files, using glob patterns. Because Vite passes absolute paths to the analyzer, prefix patterns with `**/` to match files reliably.
-
-```typescript
-memoryLeakDetector({
-  ignores: [
-    '**/*.test.{ts,tsx}',
-    '**/*.spec.{ts,tsx}',
-    { glob: '**/src/legacy/**/*.js', rules: ['generic/no-unregistered-listeners'] },
-    { glob: ['**/dist/**', '**/generated/**'], rules: ['generic/no-unsubscribed-events'] },
-  ],
-});
-```
-
-### Function / method allowlist
-
-Bypass detection for functions and methods that are known to clean up after themselves.
-
-```typescript
-memoryLeakDetector({
-  allowlist: {
-    functions: ['useInterval', 'useEventListener'],
-    methods: ['subscribeSafe', 'onCustomEvent'],
-  },
-});
-```
-
-## Baselines
-
-Fix known issues once, then ignore them going forward using a baseline file.
-
-**Step 1: Record Baseline**
-
-```typescript
-memoryLeakDetector({
-  baseline: { path: '.leak-baseline.json', update: true },
-});
-```
-
-**Step 2: Enforce Baseline**
-
-```typescript
-memoryLeakDetector({
-  baseline: '.leak-baseline.json',
-});
-```
-
-## Reports
-
-```typescript
-memoryLeakDetector({
-  reports: [
-    { format: 'html', outputFile: 'build/leak-report.html' },
-    'sarif',
-    'markdown',
-    'stylish',
-  ],
-  outputDir: '.leak-reports',
-});
-```
-
-### CI/CD Integration & SARIF
-
-Generate a SARIF file to annotate Pull Requests directly in GitHub Actions:
-
-```typescript
-memoryLeakDetector({
-  mode: 'report-only',
-  reports: ['sarif'],
-  outputDir: '.github/reports',
-});
-```
-
-Upload the output to `github/codeql-action/upload-sarif` in your pipeline workflow.
-
-## Severity Overrides
-
-```typescript
-memoryLeakDetector({
-  rules: {
-    'generic/no-uncleared-timers': 'error',
-    'react/react-useeffect-cleanup': 'warn',
-    'generic/no-unregistered-listeners': 'off',
-  },
-});
-```
+---
 
 ## Writing Custom Rules
 
-Custom rules are plain objects with a `create(context)` method that returns an ESTree visitor. Use `context.report(...)` to emit diagnostics.
+Custom rules are plain objects with a `create(context)` method that returns an ESTree visitor.
 
 ```typescript
 import { defineConfig } from 'vite';
 import memoryLeakDetector, { type RuleDefinition } from 'vite-plugin-memory-leak-detector';
 
-const customWebsocketRule: RuleDefinition = {
-  id: 'custom/websocket-cleanup',
-  description: 'Ensure websockets are closed.',
+const customIndexDBRule: RuleDefinition = {
+  id: 'custom/indexdb-cleanup',
+  description: 'Ensure databases are closed.',
   category: 'generic',
   defaultSeverity: 'error',
 
   create(context) {
-    let wsCreated = false;
-    let wsClosed = false;
+    let dbOpened = false;
+    let dbClosed = false;
 
     return {
-      NewExpression(node) {
-        if (node.callee.type === 'Identifier' && node.callee.name === 'WebSocket') {
-          wsCreated = true;
-        }
-      },
       CallExpression(node) {
-        if (
-          node.callee.type === 'MemberExpression' &&
-          node.callee.property.type === 'Identifier' &&
-          node.callee.property.name === 'close'
-        ) {
-          wsClosed = true;
-        }
+        if (node.callee.property?.name === 'open') dbOpened = true;
+        if (node.callee.property?.name === 'close') dbClosed = true;
       },
       'Program:exit'(node) {
-        if (wsCreated && !wsClosed) {
+        if (dbOpened && !dbClosed) {
           context.report({
-            ruleId: 'custom/websocket-cleanup',
-            message: 'WebSocket instantiated but never closed.',
-            suggestion: 'Call .close() when the component is unmounted.',
+            ruleId: 'custom/indexdb-cleanup',
+            message: 'Database opened but never closed.',
             line: node.loc?.start?.line ?? 1,
             column: node.loc?.start?.column ?? 0,
           });
@@ -279,79 +265,29 @@ const customWebsocketRule: RuleDefinition = {
 };
 
 export default defineConfig({
-  plugins: [memoryLeakDetector({ customRules: [customWebsocketRule] })],
+  plugins: [memoryLeakDetector({ customRules: [customIndexDBRule] })],
 });
 ```
 
-## Architecture
+---
 
-```
-src/
-├── index.ts                  # Main entry point & public API
-├── plugin.ts                 # Vite plugin lifecycle hooks
-├── config/
-│   ├── index.ts              # resolvePluginConfig
-│   ├── defaults.ts           # DEFAULT_CONFIG
-│   └── validator.ts          # Options validation
-├── types/
-│   ├── config.ts             # PluginOptions, ResolvedPluginConfig
-│   ├── diagnostic.ts         # Diagnostic, SourceLocation, CodeFrame
-│   └── rule.ts               # RuleDefinition, RuleContext, ExtractionResult
-├── core/
-│   ├── engine.ts             # LeakDetector orchestration engine (single-pass traversal)
-│   ├── parser.ts             # OXC parser wrapper + ESTree normalization
-│   ├── comments.ts           # Inline suppression directives
-│   ├── ignore.ts             # Glob-based file/rule ignores (picomatch)
-│   ├── baseline.ts           # Baseline manager + fingerprinting
-│   └── extractors/           # SFC source extractors
-│       ├── index.ts          # Extractor dispatcher
-│       ├── vue.ts            # Vue <script> / <script setup>
-│       ├── svelte.ts         # Svelte <script>
-│       └── generic.ts        # JS/TS/JSX/TSX passthrough
-├── reporter/
-│   ├── index.ts              # Report dispatcher
-│   ├── console.ts            # Colorized console reporter
-│   ├── rollup.ts             # Vite/Rollup this.warn/error adapter
-│   ├── sarif.ts              # SARIF JSON report
-│   ├── html.ts               # Interactive HTML report
-│   └── markdown.ts           # Markdown table report
-└── rules/
-    ├── index.ts              # Rule registry
-    ├── generic/
-    │   ├── no-uncleared-timers.ts
-    │   ├── no-unregistered-listeners.ts
-    │   ├── no-unconnected-observers.ts
-    │   └── no-unsubscribed-events.ts
-    ├── react/
-    │   └── react-useeffect-cleanup.ts
-    ├── vue/
-    │   └── vue-missing-onunmounted.ts
-    ├── svelte/
-    │   └── svelte-missing-ondestroy.ts
-    └── solid/
-        └── solid-missing-oncleanup.ts
-```
+## Comment Directives
 
-## Dependencies
+You can suppress specific issues directly in source code:
 
-- [`oxc-parser`](https://www.npmjs.com/package/oxc-parser) — Rust-powered JavaScript/TypeScript parser producing an ESTree AST.
-- [`estree-walker`](https://www.npmjs.com/package/estree-walker) — lightweight ESTree AST traversal.
-- [`@rollup/pluginutils`](https://www.npmjs.com/package/@rollup/pluginutils) — file include/exclude filtering.
-- [`picocolors`](https://www.npmjs.com/package/picocolors) — terminal styling for console reports.
-- [`picomatch`](https://www.npmjs.com/package/picomatch) — glob pattern matching for ignores.
+| Directive | Scope |
+|---|---|
+| `// memory-leak-ignore-next-line` | Suppresses the next line only |
+| `// memory-leak-ignore-line` | Suppresses the current line |
+| `// memory-leak-ignore-file` | Suppresses all issues in the file |
+| `// memory-leak-ignore-start` | Suppresses a block (pair with `// memory-leak-ignore-end`) |
+| `// memory-leak-ignore-end` | Ends a suppression block |
 
-## Development
-
-```bash
-npm install
-npm run typecheck
-npm run build
-npm run dev
-```
+---
 
 ## Testing
 
-The plugin ships with a comprehensive test suite powered by [Vitest](https://vitest.dev/). Tests cover all generic rules, framework-specific rules, comment directives, baseline fingerprinting, glob ignores, and full engine integration.
+The plugin ships with a comprehensive test suite powered by [Vitest](https://vitest.dev/). Tests cover all rules, comment directives, baselines, glob ignores, and full engine integration.
 
 ```bash
 npm run test
