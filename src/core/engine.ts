@@ -93,8 +93,11 @@ export class LeakDetectorEngine {
         diagnostic.fingerprint = generateFingerprint(diagnostic);
 
         // 4. BASELINE SUPPRESSION
-        if (this.baselineManager && !this.config.baseline.update) {
-          if (this.baselineManager.isBaseline(diagnostic)) return;
+        if (this.baselineManager) {
+          if (!this.config.baseline.update && this.baselineManager.isKnown(diagnostic)) {
+            // It's a legacy issue and we are NOT in update mode. Skip reporting it.
+            return;
+          }
         }
 
         diagnostics.push(diagnostic);

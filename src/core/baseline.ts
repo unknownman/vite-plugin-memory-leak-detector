@@ -1,36 +1,33 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import type { Diagnostic } from '../types/diagnostic.js';
 
 export interface BaselineEntry {
   fingerprint: string;
   ruleId: string;
   file: string;
-  line: number;
   message: string;
 }
 
 export interface BaselineFile {
   version: string;
-  createdAt: string;
-  totalLeaks: number;
-  entries: BaselineEntry[];
+  updatedAt: string;
+  issues: BaselineEntry[];
 }
 
-export function generateFingerprint(diag: Diagnostic): string {
-  // Fingerprint is a robust hash of ruleId + relative file path + core error message
-  const rawKey = `${diag.ruleId}:${diag.file}:${diag.message.trim()}`;
-  let hash = 0;
-  for (let i = 0; i < rawKey.length; i++) {
-    hash = (hash << 5) - hash + rawKey.charCodeAt(i);
-    hash |= 0; // Convert to 32bit integer
-  }
-  return Math.abs(hash).toString(16).padStart(8, '0');
+export function generateFingerprint(diag: Diagnostic, cwd: string = process.cwd()): string {
+  // Use relative paths so baselines work across different machines/CI environments
+  const relativeFile = path.relative(cwd, diag.file).replace(/\\/g, '/');
+
+  // Hash the combination of rule, file, and message (ignoring line numbers which shift easily)
+  const rawKey = `${diag.ruleId}|${relativeFile}|${diag.message}`;
+  return crypto.createHash('sha256').update(rawKey).digest('hex').substring(0, 16);
 }
 
 export class BaselineManager {
   private baselinePath: string;
-  private entriesMap = new Map<string, BaselineEntry>();
+  private knownFingerprints = new Set<string>();
 
   constructor(baselinePath: string) {
     this.baselinePath = path.resolve(process.cwd(), baselinePath);
@@ -42,39 +39,46 @@ export class BaselineManager {
     try {
       const raw = fs.readFileSync(this.baselinePath, 'utf-8');
       const data: BaselineFile = JSON.parse(raw);
-      for (const entry of data.entries) {
-        this.entriesMap.set(entry.fingerprint, entry);
+      for (const issue of data.issues) {
+        this.knownFingerprints.add(issue.fingerprint);
       }
-    } catch {
-      console.warn(`[vite-plugin-memory-leak-detector] Could not parse baseline file at ${this.baselinePath}`);
+    } catch (err) {
+      console.warn(`[MemoryLeakDetector] Warning: Could not parse baseline at ${this.baselinePath}`);
     }
   }
 
-  public isBaseline(diag: Diagnostic): boolean {
-    const fp = diag.fingerprint || generateFingerprint(diag);
-    return this.entriesMap.has(fp);
+  /**
+   * Returns true if the diagnostic is already known in the baseline.
+   */
+  public isKnown(diag: Diagnostic): boolean {
+    if (!diag.fingerprint) {
+      diag.fingerprint = generateFingerprint(diag);
+    }
+    return this.knownFingerprints.has(diag.fingerprint);
   }
 
-  public recordBaseline(diagnostics: Diagnostic[]): void {
-    const entries: BaselineEntry[] = diagnostics.map((d) => ({
+  /**
+   * Writes current findings to the baseline file.
+   */
+  public updateBaseline(diagnostics: Diagnostic[]): void {
+    const issues: BaselineEntry[] = diagnostics.map((d) => ({
       fingerprint: d.fingerprint || generateFingerprint(d),
       ruleId: d.ruleId,
-      file: d.file,
-      line: d.line,
+      file: path.relative(process.cwd(), d.file).replace(/\\/g, '/'),
       message: d.message,
     }));
 
+    // Deduplicate by fingerprint
+    const uniqueIssues = Array.from(new Map(issues.map((item) => [item.fingerprint, item])).values());
+
     const content: BaselineFile = {
-      version: '1.0',
-      createdAt: new Date().toISOString(),
-      totalLeaks: entries.length,
-      entries,
+      version: '1.0.0',
+      updatedAt: new Date().toISOString(),
+      issues: uniqueIssues,
     };
 
     const dir = path.dirname(this.baselinePath);
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
-    }
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 
     fs.writeFileSync(this.baselinePath, JSON.stringify(content, null, 2), 'utf-8');
   }

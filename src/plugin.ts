@@ -52,7 +52,7 @@ export function memoryLeakDetectorPlugin(options: PluginOptions = {}): Plugin {
       // 1. Record baseline if requested
       if (config.baseline.enabled && config.baseline.update) {
         const baselineManager = new BaselineManager(config.baseline.path);
-        baselineManager.recordBaseline(collectedDiagnostics);
+        baselineManager.updateBaseline(collectedDiagnostics);
         console.log(`[vite-plugin-memory-leak-detector] Recorded ${collectedDiagnostics.length} leak(s) to ${config.baseline.path}`);
       }
 
