@@ -1,4 +1,5 @@
 import type { RuleContext, RuleDefinition } from '../../types/rule.js';
+import { hasTeardownCall } from '../utils/teardown.js';
 
 export const solidMissingOnCleanupRule: RuleDefinition = {
   id: 'solid/missing-oncleanup',
@@ -15,7 +16,11 @@ export const solidMissingOnCleanupRule: RuleDefinition = {
       CallExpression(node: any) {
         if (node.callee.type === 'Identifier') {
           const name = node.callee.name;
-          if (name === 'onCleanup') hasTeardown = true;
+          if (name === 'onCleanup') {
+            if (hasTeardownCall(node.arguments[0])) {
+              hasTeardown = true;
+            }
+          }
           if (
             ['setInterval', 'addEventListener'].includes(name) &&
             !context.isAllowlisted(name, 'function')

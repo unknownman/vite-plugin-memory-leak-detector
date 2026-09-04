@@ -115,7 +115,7 @@ describe('vue/missing-onunmounted', () => {
     expect(diagnostics).toHaveLength(1);
   });
 
-  it('allows allocations if onUnmounted is present', () => {
+  it('allows allocations if onUnmounted is present and clears resource', () => {
     const code = `
       import { onMounted, onUnmounted } from 'vue';
       onMounted(() => { setInterval(tick, 1000); });
@@ -125,14 +125,37 @@ describe('vue/missing-onunmounted', () => {
     expect(diagnostics).toHaveLength(0);
   });
 
-  it('allows allocations if onBeforeUnmount is present', () => {
+  it('detects leak when onUnmounted is empty', () => {
+    const code = `
+      import { onMounted, onUnmounted } from 'vue';
+      onMounted(() => { setInterval(tick, 1000); });
+      onUnmounted(() => {});
+    `;
+    const diagnostics = runRule(vueMissingOnUnmountedRule, code);
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0].message).toContain('allocates external resources');
+  });
+
+  it('allows allocations if onBeforeUnmount is present and clears resource', () => {
+    const code = `
+      import { onBeforeUnmount } from 'vue';
+      onBeforeUnmount(() => {
+        clearInterval(id);
+      });
+      setInterval(tick, 1000);
+    `;
+    const diagnostics = runRule(vueMissingOnUnmountedRule, code);
+    expect(diagnostics).toHaveLength(0);
+  });
+
+  it('detects leak if onBeforeUnmount is empty', () => {
     const code = `
       import { onBeforeUnmount } from 'vue';
       onBeforeUnmount(() => {});
       setInterval(tick, 1000);
     `;
     const diagnostics = runRule(vueMissingOnUnmountedRule, code);
-    expect(diagnostics).toHaveLength(0);
+    expect(diagnostics).toHaveLength(1);
   });
 });
 
@@ -145,14 +168,26 @@ describe('svelte/missing-ondestroy', () => {
     expect(diagnostics).toHaveLength(1);
   });
 
-  it('allows allocations if onDestroy is present', () => {
+  it('allows allocations if onDestroy is present and clears resource', () => {
+    const code = `
+      import { onDestroy } from 'svelte';
+      onDestroy(() => {
+        clearInterval(id);
+      });
+      setInterval(tick, 1000);
+    `;
+    const diagnostics = runRule(svelteMissingOnDestroyRule, code);
+    expect(diagnostics).toHaveLength(0);
+  });
+
+  it('detects leak if onDestroy is empty', () => {
     const code = `
       import { onDestroy } from 'svelte';
       onDestroy(() => {});
       setInterval(tick, 1000);
     `;
     const diagnostics = runRule(svelteMissingOnDestroyRule, code);
-    expect(diagnostics).toHaveLength(0);
+    expect(diagnostics).toHaveLength(1);
   });
 });
 
@@ -165,13 +200,25 @@ describe('solid/missing-oncleanup', () => {
     expect(diagnostics).toHaveLength(1);
   });
 
-  it('allows allocations if onCleanup is present', () => {
+  it('allows allocations if onCleanup is present and clears resource', () => {
+    const code = `
+      import { onCleanup } from 'solid-js';
+      onCleanup(() => {
+        clearInterval(id);
+      });
+      setInterval(tick, 1000);
+    `;
+    const diagnostics = runRule(solidMissingOnCleanupRule, code);
+    expect(diagnostics).toHaveLength(0);
+  });
+
+  it('detects leak if onCleanup is empty', () => {
     const code = `
       import { onCleanup } from 'solid-js';
       onCleanup(() => {});
       setInterval(tick, 1000);
     `;
     const diagnostics = runRule(solidMissingOnCleanupRule, code);
-    expect(diagnostics).toHaveLength(0);
+    expect(diagnostics).toHaveLength(1);
   });
 });

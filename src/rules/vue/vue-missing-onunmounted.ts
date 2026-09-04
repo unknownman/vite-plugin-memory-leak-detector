@@ -1,4 +1,5 @@
 import type { RuleContext, RuleDefinition } from '../../types/rule.js';
+import { hasTeardownCall } from '../utils/teardown.js';
 
 export const vueMissingOnUnmountedRule: RuleDefinition = {
   id: 'vue/missing-onunmounted',
@@ -16,7 +17,9 @@ export const vueMissingOnUnmountedRule: RuleDefinition = {
         if (node.callee.type === 'Identifier') {
           const name = node.callee.name;
           if (['onUnmounted', 'onBeforeUnmount'].includes(name)) {
-            hasTeardown = true;
+            if (hasTeardownCall(node.arguments[0])) {
+              hasTeardown = true;
+            }
           }
           if (
             ['setInterval', 'addEventListener'].includes(name) &&

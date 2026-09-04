@@ -1,4 +1,5 @@
 import type { RuleContext, RuleDefinition } from '../../types/rule.js';
+import { hasTeardownCall } from '../utils/teardown.js';
 
 export const svelteMissingOnDestroyRule: RuleDefinition = {
   id: 'svelte/missing-ondestroy',
@@ -15,7 +16,11 @@ export const svelteMissingOnDestroyRule: RuleDefinition = {
       CallExpression(node: any) {
         if (node.callee.type === 'Identifier') {
           const name = node.callee.name;
-          if (name === 'onDestroy') hasTeardown = true;
+          if (name === 'onDestroy') {
+            if (hasTeardownCall(node.arguments[0])) {
+              hasTeardown = true;
+            }
+          }
           if (
             ['setInterval', 'addEventListener'].includes(name) &&
             !context.isAllowlisted(name, 'function')
