@@ -1,5 +1,23 @@
 import type { ExtractionResult } from '../../types/rule.js';
-import { parseScriptBlocks } from './scanner.js';
+import { parseScriptBlocks, getScriptLang } from './scanner.js';
+
+/**
+ * Maps a `lang` attribute value to a parser extension. Unknown or missing
+ * languages fall back to plain JavaScript.
+ */
+function inferExtension(lang: string | null): 'js' | 'ts' | 'jsx' | 'tsx' {
+  switch (lang) {
+    case 'ts':
+    case 'typescript':
+      return 'ts';
+    case 'jsx':
+      return 'jsx';
+    case 'tsx':
+      return 'tsx';
+    default:
+      return 'js';
+  }
+}
 
 /**
  * Extracts JavaScript from a Svelte component.
@@ -36,6 +54,7 @@ export function extractSvelte(code: string): ExtractionResult {
       code: code.slice(block.bodyStart, block.bodyEnd),
       lineOffset,
       columnOffset,
+      inferredExtension: inferExtension(getScriptLang(block.attrs)),
     };
   } catch (error) {
     // Failsafe: Never crash the build due to a malformed SFC

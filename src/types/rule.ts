@@ -6,6 +6,12 @@ export interface ExtractionResult {
   code: string;
   lineOffset: number;
   columnOffset: number;
+  /**
+   * The script language the extracted code is written in, used to pick an
+   * appropriate parser dialect (TS vs JS, JSX vs not) for SFC files whose
+   * filename does not carry a code extension (e.g. `.vue`, `.svelte`).
+   */
+  inferredExtension?: 'js' | 'ts' | 'jsx' | 'tsx';
 }
 
 export interface RuleContext {

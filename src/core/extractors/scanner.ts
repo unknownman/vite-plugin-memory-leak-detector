@@ -5,6 +5,15 @@ export interface ScriptBlock {
 }
 
 /**
+ * Extracts the value of the `lang` attribute (e.g. `lang="ts"`) from a
+ * <script> tag's attribute string, or null when absent.
+ */
+export function getScriptLang(attrs: string): string | null {
+  const match = /lang\s*=\s*["']([^"']+)["']/i.exec(attrs);
+  return match ? match[1].toLowerCase() : null;
+}
+
+/**
  * A robust, lightweight state-machine scanner to find <script> blocks.
  *
  * Overcomes RegExp limitations by understanding JavaScript strings and comments

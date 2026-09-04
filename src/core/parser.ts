@@ -99,6 +99,18 @@ function buildLineStarts(code: string): number[] {
   return starts;
 }
 
+const SOURCE_EXTENSION_RE = /\.(js|jsx|mjs|cjs|ts|tsx|mts|cts)$/;
+
+/**
+ * oxc-parser picks its syntax dialect (JS/TS/JSX) from the filename extension.
+ * Files whose extension is not a recognizable code extension (e.g. `.vue`,
+ * `.svelte`, or none) default to TSX, which is a superset of plain JS and
+ * supports both TypeScript and JSX.
+ */
+function toParsableFilename(filename: string): string {
+  return SOURCE_EXTENSION_RE.test(filename) ? filename : `${filename}.tsx`;
+}
+
 /**
  * Safely parses code into an ESTree AST using OXC.
  * Returns the normalized AST and any parsing errors encountered.
@@ -107,7 +119,7 @@ export function parseCode(code: string, filename = 'module.tsx'): ParseResult {
   try {
     const result = parseSync(code, {
       sourceType: 'module',
-      sourceFilename: filename,
+      sourceFilename: toParsableFilename(filename),
     });
 
     const errors = (result.errors ?? []).map((e) => new Error(String(e) || 'Parse error'));

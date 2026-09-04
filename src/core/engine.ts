@@ -39,7 +39,9 @@ export class LeakDetectorEngine {
     const scriptCode = extraction ? extraction.code : code;
     if (scriptCode.trim() === '') return diagnostics;
 
-    const { ast, errors } = parseCode(scriptCode, file);
+    const parseFilename =
+      extraction?.inferredExtension ? `${file}.${extraction.inferredExtension}` : file;
+    const { ast, errors } = parseCode(scriptCode, parseFilename);
     if (!ast || errors.length > 0) {
       if (this.config.verbose) {
         console.error(`[MemoryLeakDetector] Failed to parse ${file}:`, errors[0]?.message);
