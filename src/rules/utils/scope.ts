@@ -62,6 +62,18 @@ export class ScopeTracker {
   }
 
   /**
+   * Returns true if the current scope is nested inside a function boundary
+   * (function declaration, function expression, or arrow function). The root
+   * module scope is not considered a function.
+   */
+  isNestedInFunction(): boolean {
+    for (let i = 1; i < this.scopeStack.length; i++) {
+      if (this.scopeKinds.get(this.scopeStack[i]) === 'function') return true;
+    }
+    return false;
+  }
+
+  /**
    * Record a variable declaration in the current lexical environment.
    * `var` declarations are hoisted to the nearest enclosing function scope.
    */

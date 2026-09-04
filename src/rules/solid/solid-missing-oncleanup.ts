@@ -1,3 +1,4 @@
+import { walk } from 'estree-walker';
 import type { RuleContext, RuleDefinition } from '../../types/rule.js';
 import {
   getExpressionName,
@@ -22,29 +23,18 @@ const LEAKY_CALLS = new Set(['setInterval', 'addEventListener']);
 
 export const solidMissingOnCleanupRule: RuleDefinition = {
   id: 'solid/missing-oncleanup',
-  description: 'Checks if subscriptions are created in Solid components without onCleanup.',
+  description: 'Checks if subscriptions are created in Solid component scope without being cleared in onCleanup.',
   category: 'solid',
   defaultSeverity: 'error',
 
   create(context: RuleContext) {
     const tracker = new ScopeTracker();
-    const allocations: {
-      name: string | null;
-      node: any;
-      isHandledExternally: boolean;
-      isCollection: boolean;
-      scopeId: number;
-    }[] = [];
+    const allocations: { name: string | null; node: any }[] = [];
+    const clearedInHooks = new Set<string>();
 
     return {
       Program() {
         tracker.enterRootScope();
-      },
-
-      VariableDeclarator(node: any, parent: any) {
-        if (node.id.type === 'Identifier') {
-          tracker.declareVariable(node.id.name, getDeclarationKind(parent));
-        }
       },
 
       BlockStatement: () => tracker.enterScope('block'),
@@ -56,7 +46,13 @@ export const solidMissingOnCleanupRule: RuleDefinition = {
       ArrowFunctionExpression: () => tracker.enterScope('function'),
       'ArrowFunctionExpression:exit': () => tracker.leaveScope(),
 
-      CallExpression(node: any, parent: any, ancestors?: any[]) {
+      VariableDeclarator(node: any, parent: any) {
+        if (node.id.type === 'Identifier') {
+          tracker.declareVariable(node.id.name, getDeclarationKind(parent));
+        }
+      },
+
+      CallExpression(node: any, parent: any) {
         const callee = node.callee;
         let name = '';
 
@@ -68,46 +64,61 @@ export const solidMissingOnCleanupRule: RuleDefinition = {
 
         if (!name) return;
 
-        // Record clearance calls so cleared resources are not reported.
-        if (TEARDOWN_CALLS.has(name)) {
-          const clearedName =
-            callee.type === 'Identifier'
-              ? getExpressionName(node.arguments[0])
-              : getExpressionName(callee.object);
-          if (clearedName) tracker.addClearance(clearedName);
+        // Lifecycle teardown hook: collect the variable names it explicitly clears.
+        if (name === 'onCleanup') {
+          const callback = node.arguments[0];
+          if (
+            callback &&
+            (callback.type === 'ArrowFunctionExpression' || callback.type === 'FunctionExpression')
+          ) {
+            walk(callback.body, {
+              enter(child: any) {
+                if (child.type !== 'CallExpression') return;
+                const c = child.callee;
+                let cname = '';
+
+                if (c.type === 'Identifier') {
+                  cname = c.name;
+                } else if (c.type === 'MemberExpression' && c.property.type === 'Identifier') {
+                  cname = c.property.name;
+                }
+
+                if (TEARDOWN_CALLS.has(cname)) {
+                  const cleared =
+                    c.type === 'Identifier'
+                      ? getExpressionName(child.arguments[0])
+                      : getExpressionName(c.object);
+                  if (cleared) clearedInHooks.add(cleared);
+                }
+              },
+            });
+          }
           return;
         }
 
-        // Track leaky allocations
-        if (LEAKY_CALLS.has(name)) {
+        // Only track allocations made directly in the component scope. Allocations
+        // inside helper functions or callbacks are not this rule's responsibility.
+        if (LEAKY_CALLS.has(name) && !tracker.isNestedInFunction()) {
           const isAllowlisted =
             callee.type === 'Identifier'
               ? context.isAllowlisted(name, 'function')
               : context.isAllowlisted(name, 'method');
 
           if (!isAllowlisted) {
-            const target = getAllocationTarget(parent, ancestors);
-            allocations.push({
-              name: target.name,
-              node,
-              isHandledExternally: target.isHandledExternally,
-              isCollection: target.isCollection,
-              scopeId: tracker.currentScopeId(),
-            });
-            if (target.name) tracker.addAllocation(target.name);
+            const target = getAllocationTarget(parent);
+            if (target.name && !target.isHandledExternally && !target.isCollection) {
+              allocations.push({ name: target.name, node });
+            }
           }
         }
       },
 
       'Program:exit'() {
         for (const alloc of allocations) {
-          if (alloc.isHandledExternally || alloc.isCollection) continue;
-          if (!alloc.name) continue;
-
-          if (!tracker.isCleared(alloc.name, alloc.scopeId)) {
+          if (alloc.name && !clearedInHooks.has(alloc.name)) {
             context.report({
               ruleId: 'solid/missing-oncleanup',
-              message: `Resource '${alloc.name}' is allocated but never cleaned up in onCleanup.`,
+              message: `Resource '${alloc.name}' is allocated in the component scope but never cleared in onCleanup.`,
               suggestion: `Call clearInterval(${alloc.name}) (or the appropriate cleanup) inside onCleanup().`,
               line: alloc.node.loc?.start?.line ?? 1,
               column: alloc.node.loc?.start?.column ?? 0,
