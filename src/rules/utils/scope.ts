@@ -59,18 +59,36 @@ export class ScopeTracker {
   }
 
   /**
-   * Check if any clearance for `name` is reachable from the allocation's
-   * scope — i.e. the clearance scope is the same as or a descendant of
-   * the allocation scope.
-   *
-   * Clearances at the root scope (scopeId 0) are treated as universal
-   * module-level teardown and always count, since they execute after all
-   * function scopes have been defined and can reference any variable
-   * hoisted or declared at the top level.
+   * Finds the lowest common ancestor scope ID for two scopes.
+   * Returns null if they do not share any ancestor.
+   */
+  getCommonAncestor(scopeA: number, scopeB: number): number | null {
+    const ancestorsA = new Set<number>();
+    let currentA: number | undefined = scopeA;
+    while (currentA !== undefined) {
+      ancestorsA.add(currentA);
+      currentA = this.parentMap.get(currentA);
+    }
+
+    let currentB: number | undefined = scopeB;
+    while (currentB !== undefined) {
+      if (ancestorsA.has(currentB)) {
+        return currentB;
+      }
+      currentB = this.parentMap.get(currentB);
+    }
+
+    return null;
+  }
+
+  /**
+   * Check if any clearance for `name` shares a common ancestor scope with the
+   * allocation — meaning both have access to the same enclosing scope / closed-over
+   * variable binding (e.g. module root or component setup scope).
    */
   isCleared(name: string, allocScopeId: number): boolean {
     return this.clearances.some(
-      (c) => c.name === name && (c.scopeId === 0 || this.isDescendantOrSame(c.scopeId, allocScopeId)),
+      (c) => c.name === name && this.getCommonAncestor(allocScopeId, c.scopeId) !== null,
     );
   }
 
@@ -79,10 +97,10 @@ export class ScopeTracker {
    * descendant of `ancestor`.
    */
   isDescendantOrSame(candidate: number, ancestor: number): boolean {
-    let current = candidate;
+    let current: number | undefined = candidate;
     while (current !== undefined) {
       if (current === ancestor) return true;
-      current = this.parentMap.get(current)!;
+      current = this.parentMap.get(current);
     }
     return false;
   }

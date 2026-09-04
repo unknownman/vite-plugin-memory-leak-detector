@@ -131,14 +131,6 @@ export class LeakDetectorEngine {
     const ancestors: any[] = [];
     walk(ast, {
       enter(node: any, parent: any) {
-        if (parent && node && typeof node === 'object' && !('parent' in node)) {
-          Object.defineProperty(node, 'parent', {
-            value: parent,
-            configurable: true,
-            writable: true,
-            enumerable: false,
-          });
-        }
         for (const { visitor } of activeVisitors) {
           const handler = visitor[node.type];
           if (handler) handler(node, parent, ancestors);

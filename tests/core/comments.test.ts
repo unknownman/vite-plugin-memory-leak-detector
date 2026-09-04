@@ -50,6 +50,38 @@ setInterval(() => {}, 1000);
     expect(handler.isSuppressed('other-rule', 3, directives)).toBe(false);
   });
 
+  it('parses multi-line block comments across newlines', () => {
+    const code = `
+/* memory-leak-ignore-start 
+   generic/no-uncleared-timers */
+setInterval(() => {}, 1000);
+/* memory-leak-ignore-end 
+*/
+`;
+    const directives = handler.parseDirectives(code);
+    expect(directives).toHaveLength(2);
+    expect(directives[0].type).toBe('ignore-start');
+    expect(directives[0].rules).toEqual(['generic/no-uncleared-timers']);
+    expect(directives[1].type).toBe('ignore-end');
+
+    expect(handler.isSuppressed('generic/no-uncleared-timers', 4, directives)).toBe(true);
+    expect(handler.isSuppressed('other-rule', 4, directives)).toBe(false);
+  });
+
+  it('parses multi-line block comment without rules (all rules ignored)', () => {
+    const code = `
+/* memory-leak-ignore-start 
+*/
+setInterval(() => {}, 1000);
+/* memory-leak-ignore-end */
+`;
+    const directives = handler.parseDirectives(code);
+    expect(directives).toHaveLength(2);
+    expect(directives[0].type).toBe('ignore-start');
+    expect(directives[0].rules).toEqual([]);
+    expect(handler.isSuppressed('any-rule', 4, directives)).toBe(true);
+  });
+
   it('does not suppress when disabled', () => {
     const disabled = new CommentDirectivesHandler('memory-leak', false);
     const code = `

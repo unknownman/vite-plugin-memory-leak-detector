@@ -17,27 +17,43 @@ export class CommentDirectivesHandler {
     if (!this.enabled) return [];
 
     const directives: SuppressionDirective[] = [];
-    const lines = code.split('\n');
 
-    // Matches: // memory-leak-ignore-next-line rule1, rule2
-    const singleLinePattern = new RegExp(
-      `//\\s*${this.prefix}-(ignore-next-line|ignore-line|ignore)(.*)$`
+    // Precompute line starts for fast, accurate line number lookup from string index
+    const lineStarts: number[] = [0];
+    for (let i = 0; i < code.length; i++) {
+      if (code.charCodeAt(i) === 10 /* \n */) {
+        lineStarts.push(i + 1);
+      }
+    }
+
+    const getLineNumber = (offset: number): number => {
+      let low = 0;
+      let high = lineStarts.length - 1;
+      while (low < high) {
+        const mid = (low + high + 1) >> 1;
+        if (lineStarts[mid] <= offset) low = mid;
+        else high = mid - 1;
+      }
+      return low + 1;
+    };
+
+    // Matches single-line directives AND multi-line block comment directives globally
+    const pattern = new RegExp(
+      `//\\s*${this.prefix}-(ignore-next-line|ignore-line|ignore)(.*)$|/\\*\\s*${this.prefix}-(ignore-start|ignore-end)(?:\\s+([\\s\\S]*?))?\\s*\\*/`,
+      'gm'
     );
-    // Matches: /* memory-leak-ignore-start rule1 */
-    const blockPattern = new RegExp(
-      `/\\*\\s*${this.prefix}-(ignore-start|ignore-end)(?:\\s+([^*]+))?\\s*\\*/`,
-      'g'
-    );
 
-    lines.forEach((lineText, idx) => {
-      const lineNum = idx + 1;
+    for (const match of code.matchAll(pattern)) {
+      const matchIndex = match.index ?? 0;
+      const lineNum = getLineNumber(matchIndex);
 
-      // Single line check
-      const singleMatch = lineText.match(singleLinePattern);
-      if (singleMatch) {
-        const action = singleMatch[1];
-        const rawRules = singleMatch[2]?.trim() || '';
-        const rules = rawRules ? rawRules.split(/[\s,]+/).map((r) => r.trim()).filter(Boolean) : [];
+      if (match[1]) {
+        // Single-line comment directive
+        const action = match[1];
+        const rawRules = match[2]?.trim() || '';
+        const rules = rawRules
+          ? rawRules.split(/[\s,]+/).map((r) => r.trim()).filter(Boolean)
+          : [];
 
         if (action === 'ignore-next-line') {
           directives.push({ type: 'ignore-next-line', rules, line: lineNum });
@@ -46,14 +62,13 @@ export class CommentDirectivesHandler {
         } else if (action === 'ignore') {
           directives.push({ type: 'ignore-file', rules, line: lineNum });
         }
-      }
-
-      // Block comment check
-      let blockMatch: RegExpExecArray | null;
-      while ((blockMatch = blockPattern.exec(lineText)) !== null) {
-        const action = blockMatch[1];
-        const rawRules = blockMatch[2]?.trim() || '';
-        const rules = rawRules ? rawRules.split(/[\s,]+/).map((r) => r.trim()).filter(Boolean) : [];
+      } else if (match[3]) {
+        // Block comment directive (single or multi-line)
+        const action = match[3];
+        const rawRules = match[4]?.replace(/^\s*\*+/gm, '').trim() || '';
+        const rules = rawRules
+          ? rawRules.split(/[\s,]+/).map((r) => r.trim()).filter(Boolean)
+          : [];
 
         directives.push({
           type: action === 'ignore-start' ? 'ignore-start' : 'ignore-end',
@@ -61,7 +76,7 @@ export class CommentDirectivesHandler {
           line: lineNum,
         });
       }
-    });
+    }
 
     return directives;
   }

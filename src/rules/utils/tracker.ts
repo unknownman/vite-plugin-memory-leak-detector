@@ -50,7 +50,7 @@ export function getAllocationTarget(parent: any, ancestors?: any[]): AllocationT
     return { name: null, isHandledExternally: false, isCollection: false };
   }
 
-  // Build the list of nodes starting from the immediate parent walking upwards
+  // Build the list of nodes starting from the immediate parent walking upwards exclusively via ancestors
   const chain: any[] = [];
   if (ancestors && Array.isArray(ancestors) && ancestors.length > 0) {
     for (let i = ancestors.length - 1; i >= 0; i--) {
@@ -60,11 +60,7 @@ export function getAllocationTarget(parent: any, ancestors?: any[]): AllocationT
       chain.unshift(parent);
     }
   } else if (parent) {
-    let curr = parent;
-    while (curr) {
-      chain.push(curr);
-      curr = curr.parent;
-    }
+    chain.push(parent);
   }
 
   for (const curr of chain) {

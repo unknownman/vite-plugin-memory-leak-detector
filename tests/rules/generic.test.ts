@@ -81,14 +81,42 @@ describe('no-uncleared-timers', () => {
     expect(diagnostics).toHaveLength(0);
   });
 
-  it('flags uncleared timer in one function even if another function clears the same variable name', () => {
+  it('allows allocation in one function and clearance in a sibling function', () => {
     const code = `
-      function clean() {
-        const timerId = setInterval(() => {}, 1000);
+      let timerId;
+      function start() {
+        timerId = setInterval(() => {}, 1000);
+      }
+      function stop() {
         clearInterval(timerId);
       }
-      function leaked() {
-        const timerId = setInterval(() => {}, 1000);
+    `;
+    const diagnostics = runRule(noUnclearedTimersRule, code);
+    expect(diagnostics).toHaveLength(0);
+  });
+
+  it('allows allocation in onMounted and clearance in onUnmounted (sibling scopes)', () => {
+    const code = `
+      let timer;
+      onMounted(() => {
+        timer = setInterval(tick, 1000);
+      });
+      onUnmounted(() => {
+        clearInterval(timer);
+      });
+    `;
+    const diagnostics = runRule(noUnclearedTimersRule, code);
+    expect(diagnostics).toHaveLength(0);
+  });
+
+  it('detects uncleared timer across functions when no sibling clears it', () => {
+    const code = `
+      let timerId;
+      function start() {
+        timerId = setInterval(() => {}, 1000);
+      }
+      function other() {
+        console.log(timerId);
       }
     `;
     const diagnostics = runRule(noUnclearedTimersRule, code);
@@ -208,14 +236,28 @@ describe('no-unconnected-observers', () => {
     expect(diagnostics[0].message).toContain('without being assigned');
   });
 
-  it('flags observer in one function even if another disconnects the same variable name', () => {
+  it('allows observer in one function and disconnect in a sibling function', () => {
     const code = `
+      let obs;
       function setup() {
-        const obs = new IntersectionObserver(() => {});
+        obs = new IntersectionObserver(() => {});
       }
       function teardown() {
-        const obs = new IntersectionObserver(() => {});
         obs.disconnect();
+      }
+    `;
+    const diagnostics = runRule(noUnconnectedObserversRule, code);
+    expect(diagnostics).toHaveLength(0);
+  });
+
+  it('detects uncleared observer when no function disconnects it', () => {
+    const code = `
+      let obs;
+      function setup() {
+        obs = new IntersectionObserver(() => {});
+      }
+      function other() {
+        console.log(obs);
       }
     `;
     const diagnostics = runRule(noUnconnectedObserversRule, code);
@@ -247,14 +289,28 @@ describe('no-unclosed-websockets', () => {
     expect(diagnostics).toHaveLength(0);
   });
 
-  it('flags WebSocket in one function even if another closes the same variable name', () => {
+  it('allows WebSocket in one function and close in a sibling function', () => {
     const code = `
+      let ws;
       function open() {
-        const ws = new WebSocket('ws://localhost');
+        ws = new WebSocket('ws://localhost');
       }
       function close() {
-        const ws = new WebSocket('ws://localhost');
         ws.close();
+      }
+    `;
+    const diagnostics = runRule(noUnclosedWebsocketsRule, code);
+    expect(diagnostics).toHaveLength(0);
+  });
+
+  it('detects uncleared WebSocket when no function closes it', () => {
+    const code = `
+      let ws;
+      function open() {
+        ws = new WebSocket('ws://localhost');
+      }
+      function other() {
+        console.log(ws);
       }
     `;
     const diagnostics = runRule(noUnclosedWebsocketsRule, code);
