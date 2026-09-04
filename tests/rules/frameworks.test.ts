@@ -53,6 +53,54 @@ describe('react/react-useeffect-cleanup', () => {
     const diagnostics = runRule(reactUseEffectCleanupRule, code);
     expect(diagnostics).toHaveLength(0);
   });
+
+  it('does not suppress warning when returning null', () => {
+    const code = `
+      useEffect(() => {
+        if (!ready) return null;
+        setInterval(tick, 1000);
+      }, [ready]);
+    `;
+    const diagnostics = runRule(reactUseEffectCleanupRule, code);
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0].message).toContain('does not return a cleanup function');
+  });
+
+  it('does not suppress warning when returning false', () => {
+    const code = `
+      useEffect(() => {
+        if (!ready) return false;
+        setInterval(tick, 1000);
+      }, [ready]);
+    `;
+    const diagnostics = runRule(reactUseEffectCleanupRule, code);
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0].message).toContain('does not return a cleanup function');
+  });
+
+  it('suppresses warning when returning () => clearInterval(id)', () => {
+    const code = `
+      useEffect(() => {
+        if (!ready) return null;
+        const id = setInterval(tick, 1000);
+        return () => clearInterval(id);
+      }, [ready]);
+    `;
+    const diagnostics = runRule(reactUseEffectCleanupRule, code);
+    expect(diagnostics).toHaveLength(0);
+  });
+
+  it('allows returning an identifier holding a cleanup function reference', () => {
+    const code = `
+      useEffect(() => {
+        const id = setInterval(tick, 1000);
+        const cleanup = () => clearInterval(id);
+        return cleanup;
+      }, []);
+    `;
+    const diagnostics = runRule(reactUseEffectCleanupRule, code);
+    expect(diagnostics).toHaveLength(0);
+  });
 });
 
 describe('vue/missing-onunmounted', () => {

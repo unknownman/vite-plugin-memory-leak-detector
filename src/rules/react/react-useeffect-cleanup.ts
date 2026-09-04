@@ -26,7 +26,14 @@ function checkEffectBody(effectBodyNode: any) {
   walk(effectBodyNode, {
     enter(child: any) {
       if (child.type === 'ReturnStatement' && child.argument) {
-        hasCleanup = true;
+        const argType = child.argument.type;
+        if (
+          argType === 'ArrowFunctionExpression' ||
+          argType === 'FunctionExpression' ||
+          argType === 'Identifier'
+        ) {
+          hasCleanup = true;
+        }
       }
 
       if (child.type === 'CallExpression') {
