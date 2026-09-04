@@ -1,6 +1,24 @@
 import { walk } from 'estree-walker';
 import type { RuleContext, RuleDefinition } from '../../types/rule.js';
 
+const LEAKY_CALLS = [
+  'setInterval',
+  'addEventListener',
+  'subscribe',
+  'on',
+  'requestAnimationFrame',
+];
+
+const LEAKY_CTORS = [
+  'WebSocket',
+  'EventSource',
+  'AbortController',
+  'IntersectionObserver',
+  'MutationObserver',
+  'ResizeObserver',
+  'PerformanceObserver',
+];
+
 function checkEffectBody(effectBodyNode: any) {
   let hasCleanup = false;
   let hasLeakyCall = false;
@@ -11,7 +29,6 @@ function checkEffectBody(effectBodyNode: any) {
         hasCleanup = true;
       }
 
-      // Check standard functional allocations (Timers, Listeners, Subscriptions, Fetch)
       if (child.type === 'CallExpression') {
         const callee = child.callee;
         let name = '';
@@ -19,31 +36,14 @@ function checkEffectBody(effectBodyNode: any) {
         if (callee.type === 'MemberExpression' && callee.property.type === 'Identifier') {
           name = callee.property.name;
         }
-
-        if (
-          ['setInterval', 'addEventListener', 'subscribe', 'on', 'fetch', 'requestAnimationFrame'].includes(name)
-        ) {
+        if (LEAKY_CALLS.includes(name)) {
           hasLeakyCall = true;
         }
       }
 
-      // Check Object-based allocations (WebSockets, Observers, AbortControllers)
       if (child.type === 'NewExpression') {
-        if (child.callee.type === 'Identifier') {
-          const name = child.callee.name;
-          if (
-            [
-              'WebSocket',
-              'EventSource',
-              'AbortController',
-              'IntersectionObserver',
-              'MutationObserver',
-              'ResizeObserver',
-              'PerformanceObserver',
-            ].includes(name)
-          ) {
-            hasLeakyCall = true;
-          }
+        if (child.callee.type === 'Identifier' && LEAKY_CTORS.includes(child.callee.name)) {
+          hasLeakyCall = true;
         }
       }
     },
@@ -71,6 +71,8 @@ export const reactUseEffectCleanupRule: RuleDefinition = {
             effectFn.type === 'ArrowFunctionExpression' ||
             effectFn.type === 'FunctionExpression'
           ) {
+            // Arrow expression body (e.g., () => fetch(url)) has no block scope
+            // to return a cleanup function — skip to avoid false positives.
             if (effectFn.body.type !== 'BlockStatement') return;
 
             const { hasCleanup, hasLeakyCall } = checkEffectBody(effectFn.body);

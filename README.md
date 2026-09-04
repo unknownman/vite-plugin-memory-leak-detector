@@ -349,6 +349,16 @@ npm run build
 npm run dev
 ```
 
+## Testing
+
+The plugin ships with a comprehensive test suite powered by [Vitest](https://vitest.dev/). Tests cover all generic rules, framework-specific rules, comment directives, baseline fingerprinting, glob ignores, and full engine integration.
+
+```bash
+npm run test
+npm run test:watch
+npm run test:coverage
+```
+
 ## License
 
 MIT License
