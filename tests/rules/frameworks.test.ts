@@ -108,17 +108,18 @@ describe('vue/missing-onunmounted', () => {
     const code = `
       import { onMounted } from 'vue';
       onMounted(() => {
-        setInterval(tick, 1000);
+        const id = setInterval(tick, 1000);
       });
     `;
     const diagnostics = runRule(vueMissingOnUnmountedRule, code);
     expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0].message).toContain("Resource 'id' is allocated but never cleaned up");
   });
 
   it('allows allocations if onUnmounted is present and clears resource', () => {
     const code = `
       import { onMounted, onUnmounted } from 'vue';
-      onMounted(() => { setInterval(tick, 1000); });
+      onMounted(() => { const id = setInterval(tick, 1000); });
       onUnmounted(() => { clearInterval(id); });
     `;
     const diagnostics = runRule(vueMissingOnUnmountedRule, code);
@@ -128,21 +129,19 @@ describe('vue/missing-onunmounted', () => {
   it('detects leak when onUnmounted is empty', () => {
     const code = `
       import { onMounted, onUnmounted } from 'vue';
-      onMounted(() => { setInterval(tick, 1000); });
+      onMounted(() => { const id = setInterval(tick, 1000); });
       onUnmounted(() => {});
     `;
     const diagnostics = runRule(vueMissingOnUnmountedRule, code);
     expect(diagnostics).toHaveLength(1);
-    expect(diagnostics[0].message).toContain('allocates external resources');
+    expect(diagnostics[0].message).toContain('allocated but never cleaned up');
   });
 
   it('allows allocations if onBeforeUnmount is present and clears resource', () => {
     const code = `
       import { onBeforeUnmount } from 'vue';
-      onBeforeUnmount(() => {
-        clearInterval(id);
-      });
-      setInterval(tick, 1000);
+      onBeforeUnmount(() => { clearInterval(id); });
+      const id = setInterval(tick, 1000);
     `;
     const diagnostics = runRule(vueMissingOnUnmountedRule, code);
     expect(diagnostics).toHaveLength(0);
@@ -152,29 +151,44 @@ describe('vue/missing-onunmounted', () => {
     const code = `
       import { onBeforeUnmount } from 'vue';
       onBeforeUnmount(() => {});
-      setInterval(tick, 1000);
+      const id = setInterval(tick, 1000);
     `;
     const diagnostics = runRule(vueMissingOnUnmountedRule, code);
     expect(diagnostics).toHaveLength(1);
+  });
+
+  it('flags only the uncleared resource when two allocations exist but only one is cleared', () => {
+    const code = `
+      import { onMounted, onUnmounted } from 'vue';
+      onMounted(() => {
+        const timerA = setInterval(tick, 1000);
+        const timerB = setInterval(tock, 2000);
+      });
+      onUnmounted(() => {
+        clearInterval(timerA);
+      });
+    `;
+    const diagnostics = runRule(vueMissingOnUnmountedRule, code);
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0].message).toContain("Resource 'timerB' is allocated but never cleaned up");
   });
 });
 
 describe('svelte/missing-ondestroy', () => {
   it('detects allocations without onDestroy', () => {
     const code = `
-      setInterval(tick, 1000);
+      const id = setInterval(tick, 1000);
     `;
     const diagnostics = runRule(svelteMissingOnDestroyRule, code);
     expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0].message).toContain("Resource 'id' is allocated but never cleaned up");
   });
 
   it('allows allocations if onDestroy is present and clears resource', () => {
     const code = `
       import { onDestroy } from 'svelte';
-      onDestroy(() => {
-        clearInterval(id);
-      });
-      setInterval(tick, 1000);
+      onDestroy(() => { clearInterval(id); });
+      const id = setInterval(tick, 1000);
     `;
     const diagnostics = runRule(svelteMissingOnDestroyRule, code);
     expect(diagnostics).toHaveLength(0);
@@ -184,29 +198,42 @@ describe('svelte/missing-ondestroy', () => {
     const code = `
       import { onDestroy } from 'svelte';
       onDestroy(() => {});
-      setInterval(tick, 1000);
+      const id = setInterval(tick, 1000);
     `;
     const diagnostics = runRule(svelteMissingOnDestroyRule, code);
     expect(diagnostics).toHaveLength(1);
+  });
+
+  it('flags only the uncleared resource when two allocations exist but only one is cleared', () => {
+    const code = `
+      import { onDestroy } from 'svelte';
+      const timerA = setInterval(tick, 1000);
+      const timerB = setInterval(tock, 2000);
+      onDestroy(() => {
+        clearInterval(timerA);
+      });
+    `;
+    const diagnostics = runRule(svelteMissingOnDestroyRule, code);
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0].message).toContain("Resource 'timerB' is allocated but never cleaned up");
   });
 });
 
 describe('solid/missing-oncleanup', () => {
   it('detects allocations without onCleanup', () => {
     const code = `
-      setInterval(tick, 1000);
+      const id = setInterval(tick, 1000);
     `;
     const diagnostics = runRule(solidMissingOnCleanupRule, code);
     expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0].message).toContain("Resource 'id' is allocated but never cleaned up");
   });
 
   it('allows allocations if onCleanup is present and clears resource', () => {
     const code = `
       import { onCleanup } from 'solid-js';
-      onCleanup(() => {
-        clearInterval(id);
-      });
-      setInterval(tick, 1000);
+      onCleanup(() => { clearInterval(id); });
+      const id = setInterval(tick, 1000);
     `;
     const diagnostics = runRule(solidMissingOnCleanupRule, code);
     expect(diagnostics).toHaveLength(0);
@@ -216,9 +243,23 @@ describe('solid/missing-oncleanup', () => {
     const code = `
       import { onCleanup } from 'solid-js';
       onCleanup(() => {});
-      setInterval(tick, 1000);
+      const id = setInterval(tick, 1000);
     `;
     const diagnostics = runRule(solidMissingOnCleanupRule, code);
     expect(diagnostics).toHaveLength(1);
+  });
+
+  it('flags only the uncleared resource when two allocations exist but only one is cleared', () => {
+    const code = `
+      import { onCleanup } from 'solid-js';
+      const timerA = setInterval(tick, 1000);
+      const timerB = setInterval(tock, 2000);
+      onCleanup(() => {
+        clearInterval(timerA);
+      });
+    `;
+    const diagnostics = runRule(solidMissingOnCleanupRule, code);
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0].message).toContain("Resource 'timerB' is allocated but never cleaned up");
   });
 });
