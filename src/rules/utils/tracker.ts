@@ -21,6 +21,15 @@ export function getExpressionName(node: any): string | null {
   return null;
 }
 
+/**
+ * Returns the declaration kind (`var`, `let`, or `const`) for a
+ * `VariableDeclarator` by reading its parent `VariableDeclaration` node.
+ * Defaults to `let` for non-`VariableDeclaration` parents.
+ */
+export function getDeclarationKind(parent: any): 'var' | 'let' | 'const' {
+  return parent && parent.type === 'VariableDeclaration' ? parent.kind : 'let';
+}
+
 export interface AllocationTarget {
   /** The name of the variable/property the allocation is assigned to */
   name: string | null;

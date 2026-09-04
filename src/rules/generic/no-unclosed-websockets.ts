@@ -1,5 +1,5 @@
 import type { RuleContext, RuleDefinition } from '../../types/rule.js';
-import { getExpressionName, getAllocationTarget } from '../utils/tracker.js';
+import { getExpressionName, getAllocationTarget, getDeclarationKind } from '../utils/tracker.js';
 import { ScopeTracker } from '../utils/scope.js';
 
 export const noUnclosedWebsocketsRule: RuleDefinition = {
@@ -24,6 +24,21 @@ export const noUnclosedWebsocketsRule: RuleDefinition = {
       Program() {
         tracker.enterRootScope();
       },
+
+      VariableDeclarator(node: any, parent: any) {
+        if (node.id.type === 'Identifier') {
+          tracker.declareVariable(node.id.name, getDeclarationKind(parent));
+        }
+      },
+
+      BlockStatement: () => tracker.enterScope('block'),
+      'BlockStatement:exit': () => tracker.leaveScope(),
+      FunctionDeclaration: () => tracker.enterScope('function'),
+      'FunctionDeclaration:exit': () => tracker.leaveScope(),
+      FunctionExpression: () => tracker.enterScope('function'),
+      'FunctionExpression:exit': () => tracker.leaveScope(),
+      ArrowFunctionExpression: () => tracker.enterScope('function'),
+      'ArrowFunctionExpression:exit': () => tracker.leaveScope(),
 
       'Program:exit'() {
         for (const alloc of allocations) {
@@ -78,13 +93,6 @@ export const noUnclosedWebsocketsRule: RuleDefinition = {
           }
         }
       },
-
-      FunctionDeclaration: () => tracker.enterScope(),
-      'FunctionDeclaration:exit': () => tracker.leaveScope(),
-      FunctionExpression: () => tracker.enterScope(),
-      'FunctionExpression:exit': () => tracker.leaveScope(),
-      ArrowFunctionExpression: () => tracker.enterScope(),
-      'ArrowFunctionExpression:exit': () => tracker.leaveScope(),
     };
   },
 };

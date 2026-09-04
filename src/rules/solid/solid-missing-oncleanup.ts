@@ -1,6 +1,9 @@
-import { walk } from 'estree-walker';
 import type { RuleContext, RuleDefinition } from '../../types/rule.js';
-import { getExpressionName, getAllocationTarget } from '../utils/tracker.js';
+import {
+  getExpressionName,
+  getAllocationTarget,
+  getDeclarationKind,
+} from '../utils/tracker.js';
 import { ScopeTracker } from '../utils/scope.js';
 
 const TEARDOWN_CALLS = new Set([
@@ -25,12 +28,33 @@ export const solidMissingOnCleanupRule: RuleDefinition = {
 
   create(context: RuleContext) {
     const tracker = new ScopeTracker();
-    const allocations: { name: string | null; node: any; scopeId: number }[] = [];
+    const allocations: {
+      name: string | null;
+      node: any;
+      isHandledExternally: boolean;
+      isCollection: boolean;
+      scopeId: number;
+    }[] = [];
 
     return {
       Program() {
         tracker.enterRootScope();
       },
+
+      VariableDeclarator(node: any, parent: any) {
+        if (node.id.type === 'Identifier') {
+          tracker.declareVariable(node.id.name, getDeclarationKind(parent));
+        }
+      },
+
+      BlockStatement: () => tracker.enterScope('block'),
+      'BlockStatement:exit': () => tracker.leaveScope(),
+      FunctionDeclaration: () => tracker.enterScope('function'),
+      'FunctionDeclaration:exit': () => tracker.leaveScope(),
+      FunctionExpression: () => tracker.enterScope('function'),
+      'FunctionExpression:exit': () => tracker.leaveScope(),
+      ArrowFunctionExpression: () => tracker.enterScope('function'),
+      'ArrowFunctionExpression:exit': () => tracker.leaveScope(),
 
       CallExpression(node: any, parent: any, ancestors?: any[]) {
         const callee = node.callee;
@@ -44,37 +68,13 @@ export const solidMissingOnCleanupRule: RuleDefinition = {
 
         if (!name) return;
 
-        // Handle onCleanup: enter callback scope, find clearances, exit
-        if (name === 'onCleanup') {
-          const callback = node.arguments[0];
-          if (
-            callback &&
-            (callback.type === 'ArrowFunctionExpression' || callback.type === 'FunctionExpression')
-          ) {
-            tracker.enterScope();
-
-            walk(callback.body, {
-              enter(child: any) {
-                if (child.type === 'CallExpression') {
-                  const c = child.callee;
-                  let clearanceName = '';
-
-                  if (c.type === 'Identifier') {
-                    clearanceName = c.name;
-                  } else if (c.type === 'MemberExpression' && c.property.type === 'Identifier') {
-                    clearanceName = c.property.name;
-                  }
-
-                  if (TEARDOWN_CALLS.has(clearanceName)) {
-                    const argName = getExpressionName(child.arguments[0]);
-                    if (argName) tracker.addClearance(argName);
-                  }
-                }
-              },
-            });
-
-            tracker.leaveScope();
-          }
+        // Record clearance calls so cleared resources are not reported.
+        if (TEARDOWN_CALLS.has(name)) {
+          const clearedName =
+            callee.type === 'Identifier'
+              ? getExpressionName(node.arguments[0])
+              : getExpressionName(callee.object);
+          if (clearedName) tracker.addClearance(clearedName);
           return;
         }
 
@@ -87,21 +87,21 @@ export const solidMissingOnCleanupRule: RuleDefinition = {
 
           if (!isAllowlisted) {
             const target = getAllocationTarget(parent, ancestors);
-            allocations.push({ name: target.name, node, scopeId: tracker.currentScopeId() });
+            allocations.push({
+              name: target.name,
+              node,
+              isHandledExternally: target.isHandledExternally,
+              isCollection: target.isCollection,
+              scopeId: tracker.currentScopeId(),
+            });
             if (target.name) tracker.addAllocation(target.name);
           }
         }
       },
 
-      FunctionDeclaration: () => tracker.enterScope(),
-      'FunctionDeclaration:exit': () => tracker.leaveScope(),
-      FunctionExpression: () => tracker.enterScope(),
-      'FunctionExpression:exit': () => tracker.leaveScope(),
-      ArrowFunctionExpression: () => tracker.enterScope(),
-      'ArrowFunctionExpression:exit': () => tracker.leaveScope(),
-
       'Program:exit'() {
         for (const alloc of allocations) {
+          if (alloc.isHandledExternally || alloc.isCollection) continue;
           if (!alloc.name) continue;
 
           if (!tracker.isCleared(alloc.name, alloc.scopeId)) {

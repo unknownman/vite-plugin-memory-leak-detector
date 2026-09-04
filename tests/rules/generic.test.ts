@@ -136,6 +136,62 @@ describe('no-uncleared-timers', () => {
     const diagnostics = runRule(noUnclearedTimersRule, code);
     expect(diagnostics).toHaveLength(0);
   });
+
+  it('flags a timer whose local id is never cleared even when a sibling function clears its own id', () => {
+    const code = `
+      function start() {
+        const id = setInterval(() => {}, 1000);
+      }
+      function stop() {
+        const id = setInterval(() => {}, 500);
+        clearInterval(id);
+      }
+    `;
+    const diagnostics = runRule(noUnclearedTimersRule, code);
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0].message).toContain("Timer 'id'");
+  });
+
+  it('flags a timer whose local id is not cleared by a sibling function clearing the same name', () => {
+    const code = `
+      function start() {
+        const id = setInterval(() => {}, 1000);
+      }
+      function stop() {
+        clearInterval(id);
+      }
+    `;
+    const diagnostics = runRule(noUnclearedTimersRule, code);
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0].message).toContain("Timer 'id'");
+  });
+
+  it('does not treat onUnmounted clearance as valid for a resource declared inside onMounted', () => {
+    const code = `
+      onMounted(() => {
+        const timer = setInterval(tick, 1000);
+      });
+      onUnmounted(() => {
+        clearInterval(timer);
+      });
+    `;
+    const diagnostics = runRule(noUnclearedTimersRule, code);
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0].message).toContain("Timer 'timer'");
+  });
+
+  it('allows var-declared timer in a block to be cleared in the enclosing function', () => {
+    const code = `
+      function setup() {
+        if (ready) {
+          var id = setInterval(tick, 1000);
+        }
+        clearInterval(id);
+      }
+    `;
+    const diagnostics = runRule(noUnclearedTimersRule, code);
+    expect(diagnostics).toHaveLength(0);
+  });
 });
 
 describe('no-uncleared-animation-frames', () => {

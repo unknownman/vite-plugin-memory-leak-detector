@@ -128,14 +128,26 @@ describe('vue/missing-onunmounted', () => {
     expect(diagnostics[0].message).toContain("Resource 'id' is allocated but never cleaned up");
   });
 
-  it('allows allocations if onUnmounted is present and clears resource', () => {
+  it('allows allocations if onUnmounted is present and clears resource declared in shared scope', () => {
+    const code = `
+      import { onMounted, onUnmounted } from 'vue';
+      let id;
+      onMounted(() => { id = setInterval(tick, 1000); });
+      onUnmounted(() => { clearInterval(id); });
+    `;
+    const diagnostics = runRule(vueMissingOnUnmountedRule, code);
+    expect(diagnostics).toHaveLength(0);
+  });
+
+  it('does not treat onUnmounted clearance as valid for a resource declared inside onMounted', () => {
     const code = `
       import { onMounted, onUnmounted } from 'vue';
       onMounted(() => { const id = setInterval(tick, 1000); });
       onUnmounted(() => { clearInterval(id); });
     `;
     const diagnostics = runRule(vueMissingOnUnmountedRule, code);
-    expect(diagnostics).toHaveLength(0);
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0].message).toContain("Resource 'id' is allocated but never cleaned up");
   });
 
   it('detects leak when onUnmounted is empty', () => {
@@ -172,9 +184,11 @@ describe('vue/missing-onunmounted', () => {
   it('flags only the uncleared resource when two allocations exist but only one is cleared', () => {
     const code = `
       import { onMounted, onUnmounted } from 'vue';
+      let timerA;
+      let timerB;
       onMounted(() => {
-        const timerA = setInterval(tick, 1000);
-        const timerB = setInterval(tock, 2000);
+        timerA = setInterval(tick, 1000);
+        timerB = setInterval(tock, 2000);
       });
       onUnmounted(() => {
         clearInterval(timerA);
