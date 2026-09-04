@@ -45,26 +45,34 @@ export function memoryLeakDetectorPlugin(options: PluginOptions = {}): Plugin {
     // 2. Clean up cache on file deletion during dev mode
     configureServer(server: ViteDevServer) {
       server.watcher.on('unlink', (id) => {
-        diagnosticMap.delete(id);
+        // Filesystem events never carry query strings; normalize so the key
+        // matches the keys written by `transform` below.
+        diagnosticMap.delete(id.split('?')[0]);
       });
     },
 
     // 3. Process each file
     transform(code, id) {
-      if (!filter(id)) return null;
+      // Virtual modules (e.g. `App.vue?vue&type=script`, `App.ts?raw`) are
+      // slices of their primary file and are already covered by this primary
+      // transform. The cache is keyed by the bare physical path so each file
+      // holds exactly one entry and HMR updates/unlinks never leak or wipe it.
+      const normalizedId = id.split('?')[0];
+      if (!filter(normalizedId)) return null;
+      if (normalizedId !== id) return null;
 
-      const extraction = extractSource(id, code);
+      const extraction = extractSource(normalizedId, code);
       if (!extraction) return null;
 
-      const diagnostics = engine.analyze(id, code, extraction);
+      const diagnostics = engine.analyze(normalizedId, code, extraction);
 
       // Update cache
       if (diagnostics.length === 0) {
-        diagnosticMap.delete(id);
+        diagnosticMap.delete(normalizedId);
         return null;
       }
 
-      diagnosticMap.set(id, diagnostics);
+      diagnosticMap.set(normalizedId, diagnostics);
 
       // Real-time terminal/browser reporting
       if (config.mode !== 'report-only') {
@@ -73,11 +81,10 @@ export function memoryLeakDetectorPlugin(options: PluginOptions = {}): Plugin {
         );
 
         if (hasTerminalReport) {
-          // In DEV mode, if mode is 'error', trigger Vite's red error overlay immediately.
-          // In BUILD mode, defer fatal errors until `buildEnd` so the developer sees
-          // a full list of all leaks rather than crashing on the very first file.
-          const triggerImmediateFatalError = config.mode === 'error' && !isBuild;
-          rollupReporter(this, diagnostics, triggerImmediateFatalError);
+          // Never call context.error() during transform — it fatally aborts the
+          // module chain. Emit everything as warnings here; the build is only
+          // failed via context.error() in buildEnd when thresholds are exceeded.
+          rollupReporter(this, diagnostics);
           emittedViaRollup = true;
         }
       }

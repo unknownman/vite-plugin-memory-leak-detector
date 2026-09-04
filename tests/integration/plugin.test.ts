@@ -67,4 +67,63 @@ describe('memoryLeakDetectorPlugin UX and reporting', () => {
 
     consoleLogSpy.mockRestore();
   });
+
+  it('never fatally aborts the module during transform even in error mode', async () => {
+    const plugin = memoryLeakDetectorPlugin({
+      mode: 'error',
+      reports: [{ format: 'stylish' }],
+    }) as any;
+    const rollupContext = {
+      warn: vi.fn(),
+      error: vi.fn(),
+    };
+    const consoleLogSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    plugin.configResolved({ command: 'serve' });
+    plugin.buildStart();
+
+    const code = `setInterval(() => {}, 1000);`;
+    await plugin.transform.call(rollupContext, code, '/test/src/App.ts');
+
+    // Errors must be downgraded to warnings in transform; context.error is
+    // reserved for buildEnd threshold enforcement.
+    expect(rollupContext.warn).toHaveBeenCalled();
+    expect(rollupContext.error).not.toHaveBeenCalled();
+
+    consoleLogSpy.mockRestore();
+  });
+
+  it('keys the diagnostic cache by physical path, skipping virtual module slices', async () => {
+    const plugin = memoryLeakDetectorPlugin({
+      reports: [{ format: 'stylish' }, { format: 'json' }],
+    }) as any;
+    const rollupContext = {
+      warn: vi.fn(),
+      error: vi.fn(),
+    };
+    const consoleLogSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const dispatchSpy = vi.spyOn(reporterModule, 'dispatchReports');
+
+    plugin.configResolved({ command: 'build' });
+    plugin.buildStart();
+
+    const code = `setInterval(() => {}, 1000);`;
+
+    // Virtual module slice (same physical file): must be ignored entirely.
+    await plugin.transform.call(rollupContext, code, '/test/src/App.ts?vue&type=script&lang.ts');
+    expect(rollupContext.warn).not.toHaveBeenCalled();
+
+    // Real module transform: reported once.
+    await plugin.transform.call(rollupContext, code, '/test/src/App.ts');
+    expect(rollupContext.warn).toHaveBeenCalledTimes(1);
+
+    await plugin.buildEnd.call(rollupContext);
+
+    // Exactly one physical file's diagnostics reach the summary, not two.
+    expect(dispatchSpy).toHaveBeenCalled();
+    expect(dispatchSpy.mock.calls[0][0]).toHaveLength(1);
+
+    consoleLogSpy.mockRestore();
+    dispatchSpy.mockRestore();
+  });
 });
