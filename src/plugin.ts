@@ -26,6 +26,7 @@ export function memoryLeakDetectorPlugin(options: PluginOptions = {}): Plugin {
   // without running a full project scan.
   const diagnosticMap = new Map<string, Diagnostic[]>();
   let isBuild = false;
+  let emittedViaRollup = false;
 
   return {
     name: 'vite-plugin-memory-leak-detector',
@@ -35,6 +36,10 @@ export function memoryLeakDetectorPlugin(options: PluginOptions = {}): Plugin {
     // 1. Determine operating mode (dev vs build)
     configResolved(viteConfig) {
       isBuild = viteConfig.command === 'build';
+    },
+
+    buildStart() {
+      emittedViaRollup = false;
     },
 
     // 2. Clean up cache on file deletion during dev mode
@@ -73,6 +78,7 @@ export function memoryLeakDetectorPlugin(options: PluginOptions = {}): Plugin {
           // a full list of all leaks rather than crashing on the very first file.
           const triggerImmediateFatalError = config.mode === 'error' && !isBuild;
           rollupReporter(this, diagnostics, triggerImmediateFatalError);
+          emittedViaRollup = true;
         }
       }
 
@@ -98,8 +104,15 @@ export function memoryLeakDetectorPlugin(options: PluginOptions = {}): Plugin {
         );
       }
 
+      // Only dispatch terminal/stylish reports if they were NOT already emitted via rollupReporter,
+      // and skip them in dev mode since Vite outputs warnings during HMR transforms.
+      const shouldSkipTerminalReports = emittedViaRollup || !isBuild;
+      const reportsToDispatch = shouldSkipTerminalReports
+        ? config.reports.filter((r) => r.format !== 'stylish' && r.format !== 'default')
+        : config.reports;
+
       // Dispatch structured reports (HTML, SARIF, Markdown, JSON)
-      dispatchReports(allDiagnostics, config.reports, config.outputDir);
+      dispatchReports(allDiagnostics, reportsToDispatch, config.outputDir);
 
       if (config.mode === 'report-only') {
         console.log(

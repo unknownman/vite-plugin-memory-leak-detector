@@ -43,6 +43,8 @@ export function dispatchReports(
         if (sourceContext) {
           const source = sourceForFile(sourceContext.file, sourceContext.code);
           consoleReporter(diagnostics, source, { verbose: sourceContext.verbose });
+        } else {
+          consoleReporter(diagnostics, undefined, { verbose: false });
         }
         break;
     }
