@@ -47,6 +47,9 @@ export { IgnoreManager } from './core/ignore.js';
 export {
   builtinRules,
   noUnclearedTimersRule,
+  noUnclearedAnimationFramesRule,
+  noUnclosedWebsocketsRule,
+  noMissingAbortControllerRule,
   noUnregisteredListenersRule,
   noUnconnectedObserversRule,
   noUnsubscribedEventsRule,

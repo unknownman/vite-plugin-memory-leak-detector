@@ -1,21 +1,20 @@
 import type { RuleContext, RuleDefinition } from '../../types/rule.js';
 import { getExpressionName, getAllocationTarget } from '../utils/tracker.js';
 
-export const noUnclearedTimersRule: RuleDefinition = {
-  id: 'generic/no-uncleared-timers',
-  description: 'Detects setInterval calls whose tracking variable is never cleared.',
+export const noUnclearedAnimationFramesRule: RuleDefinition = {
+  id: 'generic/no-uncleared-animation-frames',
+  description: 'Detects requestAnimationFrame calls whose tracking variable is never canceled.',
   category: 'generic',
   defaultSeverity: 'warn',
 
   create(context: RuleContext) {
     const allocations: {
-      type: string;
       name: string | null;
       node: any;
       isHandledExternally: boolean;
       isCollection: boolean;
     }[] = [];
-    const clearedNames = new Set<string>();
+    const canceledNames = new Set<string>();
 
     return {
       CallExpression(node: any, parent: any) {
@@ -29,43 +28,41 @@ export const noUnclearedTimersRule: RuleDefinition = {
 
         if (!name || context.isAllowlisted(name, callee.type === 'Identifier' ? 'function' : 'method')) return;
 
-        if (['setInterval', 'setTimeout'].includes(name)) {
+        if (name === 'requestAnimationFrame') {
           const target = getAllocationTarget(parent);
           allocations.push({
-            type: name,
             name: target.name,
             isHandledExternally: target.isHandledExternally,
             isCollection: target.isCollection,
             node,
           });
-        } else if (['clearInterval', 'clearTimeout'].includes(name)) {
+        } else if (name === 'cancelAnimationFrame') {
           const arg = node.arguments[0];
-          const clearedName = getExpressionName(arg);
-          if (clearedName) clearedNames.add(clearedName);
+          const canceledName = getExpressionName(arg);
+          if (canceledName) canceledNames.add(canceledName);
         }
       },
 
       'Program:exit'() {
         for (const alloc of allocations) {
-          if (alloc.type === 'setTimeout') continue;
           if (alloc.isHandledExternally || alloc.isCollection) continue;
 
           if (!alloc.name) {
             context.report({
-              ruleId: 'generic/no-uncleared-timers',
-              message: `A '${alloc.type}' is created but never assigned to a variable, making it impossible to clear.`,
-              suggestion: `Assign the timer to a variable (e.g., 'const id = ${alloc.type}(...)') and clear it on teardown.`,
+              ruleId: 'generic/no-uncleared-animation-frames',
+              message: `A 'requestAnimationFrame' is started but never assigned to a variable, making it impossible to cancel.`,
+              suggestion: `Assign the ID to a variable (e.g., 'const id = requestAnimationFrame(...)') and call cancelAnimationFrame(id) on teardown.`,
               line: alloc.node.loc?.start?.line ?? 1,
               column: alloc.node.loc?.start?.column ?? 0,
             });
             continue;
           }
 
-          if (!clearedNames.has(alloc.name)) {
+          if (!canceledNames.has(alloc.name)) {
             context.report({
-              ruleId: 'generic/no-uncleared-timers',
-              message: `Timer '${alloc.name}' (${alloc.type}) is allocated but never cleared.`,
-              suggestion: `Call clearInterval(${alloc.name}) when the component or process finishes.`,
+              ruleId: 'generic/no-uncleared-animation-frames',
+              message: `Animation frame ID '${alloc.name}' is allocated but never canceled.`,
+              suggestion: `Call cancelAnimationFrame(${alloc.name}) when the component unmounts to stop the animation loop.`,
               line: alloc.node.loc?.start?.line ?? 1,
               column: alloc.node.loc?.start?.column ?? 0,
             });

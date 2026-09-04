@@ -47,16 +47,19 @@ export default defineConfig({
 
 | Rule ID | Default Severity | Description |
 |---|---|---|
-| `generic/no-uncleared-timers` | `warn` | `setInterval` / `setTimeout` allocated without being cleared. |
+| `generic/no-uncleared-timers` | `warn` | `setInterval` allocated without being cleared. |
+| `generic/no-uncleared-animation-frames` | `warn` | `requestAnimationFrame` allocated without being canceled. |
 | `generic/no-unregistered-listeners` | `warn` | `addEventListener` allocated without `removeEventListener`. |
-| `generic/no-unconnected-observers` | `warn` | `IntersectionObserver` / `ResizeObserver` without `.disconnect()`. |
+| `generic/no-unconnected-observers` | `warn` | `IntersectionObserver`, `PerformanceObserver`, etc. without `.disconnect()`. |
+| `generic/no-unclosed-websockets` | `warn` | `new WebSocket()` or `EventSource` without `.close()`. |
+| `generic/no-missing-abort-controller` | `warn` | `new AbortController()` without `.abort()` called. |
 | `generic/no-unsubscribed-events` | `warn` | `RxJS` / `EventEmitter` subscriptions without `.unsubscribe()`. |
 
 ### Framework Rules
 
 | Rule ID | Default Severity | Description |
 |---|---|---|
-| `react/react-useeffect-cleanup` | `error` | `useEffect` allocating timers/listeners without returning a cleanup function. |
+| `react/react-useeffect-cleanup` | `error` | `useEffect` allocating timers/listeners/websockets without returning a cleanup function. |
 | `vue/missing-onunmounted` | `error` | Intervals/listeners in `<script setup>` without `onUnmounted`. |
 | `svelte/missing-ondestroy` | `error` | Intervals/listeners in `<script>` without `onDestroy`. |
 | `solid/missing-oncleanup` | `error` | Unmanaged allocations inside components/effects without `onCleanup`. |
