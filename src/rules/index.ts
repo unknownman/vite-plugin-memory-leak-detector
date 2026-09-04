@@ -4,6 +4,9 @@ import { noUnregisteredListenersRule } from './generic/no-unregistered-listeners
 import { noUnconnectedObserversRule } from './generic/no-unconnected-observers.js';
 import { noUnsubscribedEventsRule } from './generic/no-unsubscribed-events.js';
 import { reactUseEffectCleanupRule } from './react/react-useeffect-cleanup.js';
+import { vueMissingOnUnmountedRule } from './vue/vue-missing-onunmounted.js';
+import { svelteMissingOnDestroyRule } from './svelte/svelte-missing-ondestroy.js';
+import { solidMissingOnCleanupRule } from './solid/solid-missing-oncleanup.js';
 
 export const builtinRules: RuleDefinition[] = [
   noUnclearedTimersRule,
@@ -11,6 +14,9 @@ export const builtinRules: RuleDefinition[] = [
   noUnconnectedObserversRule,
   noUnsubscribedEventsRule,
   reactUseEffectCleanupRule,
+  vueMissingOnUnmountedRule,
+  svelteMissingOnDestroyRule,
+  solidMissingOnCleanupRule,
 ];
 
 export {
@@ -19,4 +25,7 @@ export {
   noUnconnectedObserversRule,
   noUnsubscribedEventsRule,
   reactUseEffectCleanupRule,
+  vueMissingOnUnmountedRule,
+  svelteMissingOnDestroyRule,
+  solidMissingOnCleanupRule,
 };
