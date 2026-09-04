@@ -1,5 +1,6 @@
 import type { RuleContext, RuleDefinition } from '../../types/rule.js';
 import { getExpressionName, getAllocationTarget } from '../utils/tracker.js';
+import { ScopeTracker } from '../utils/scope.js';
 
 export const noUnsubscribedEventsRule: RuleDefinition = {
   id: 'generic/no-unsubscribed-events',
@@ -8,34 +9,20 @@ export const noUnsubscribedEventsRule: RuleDefinition = {
   defaultSeverity: 'warn',
 
   create(context: RuleContext) {
+    const tracker = new ScopeTracker();
+
     const allocations: {
       name: string | null;
       method: string;
       isHandledExternally: boolean;
       isCollection: boolean;
       node: any;
+      scopeId: number;
     }[] = [];
-    const unsubscribedNames = new Set<string>();
 
     return {
-      CallExpression(node: any, parent: any) {
-        if (node.callee.type === 'MemberExpression' && node.callee.property.type === 'Identifier') {
-          const method = node.callee.property.name;
-
-          if (method === 'subscribe' || method === 'on') {
-            const target = getAllocationTarget(parent);
-            allocations.push({
-              name: target.name,
-              method,
-              isHandledExternally: target.isHandledExternally,
-              isCollection: target.isCollection,
-              node,
-            });
-          } else if (method === 'unsubscribe' || method === 'off') {
-            const unsubscribedName = getExpressionName(node.callee.object);
-            if (unsubscribedName) unsubscribedNames.add(unsubscribedName);
-          }
-        }
+      Program() {
+        tracker.enterRootScope();
       },
 
       'Program:exit'() {
@@ -53,7 +40,7 @@ export const noUnsubscribedEventsRule: RuleDefinition = {
             continue;
           }
 
-          if (!unsubscribedNames.has(alloc.name)) {
+          if (!tracker.isCleared(alloc.name, alloc.scopeId)) {
             context.report({
               ruleId: 'generic/no-unsubscribed-events',
               message: `Subscription '${alloc.name}' is created but never unsubscribed.`,
@@ -64,6 +51,36 @@ export const noUnsubscribedEventsRule: RuleDefinition = {
           }
         }
       },
+
+      CallExpression(node: any, parent: any) {
+        if (node.callee.type === 'MemberExpression' && node.callee.property.type === 'Identifier') {
+          const method = node.callee.property.name;
+
+          if (method === 'subscribe' || method === 'on') {
+            const target = getAllocationTarget(parent);
+            const alloc = {
+              name: target.name,
+              method,
+              isHandledExternally: target.isHandledExternally,
+              isCollection: target.isCollection,
+              node,
+              scopeId: tracker.currentScopeId(),
+            };
+            allocations.push(alloc);
+            if (target.name) tracker.addAllocation(target.name);
+          } else if (method === 'unsubscribe' || method === 'off') {
+            const unsubscribedName = getExpressionName(node.callee.object);
+            if (unsubscribedName) tracker.addClearance(unsubscribedName);
+          }
+        }
+      },
+
+      FunctionDeclaration: () => tracker.enterScope(),
+      'FunctionDeclaration:exit': () => tracker.leaveScope(),
+      FunctionExpression: () => tracker.enterScope(),
+      'FunctionExpression:exit': () => tracker.leaveScope(),
+      ArrowFunctionExpression: () => tracker.enterScope(),
+      'ArrowFunctionExpression:exit': () => tracker.leaveScope(),
     };
   },
 };

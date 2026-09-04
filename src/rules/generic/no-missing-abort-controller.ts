@@ -1,5 +1,6 @@
 import type { RuleContext, RuleDefinition } from '../../types/rule.js';
 import { getExpressionName, getAllocationTarget } from '../utils/tracker.js';
+import { ScopeTracker } from '../utils/scope.js';
 
 export const noMissingAbortControllerRule: RuleDefinition = {
   id: 'generic/no-missing-abort-controller',
@@ -8,34 +9,19 @@ export const noMissingAbortControllerRule: RuleDefinition = {
   defaultSeverity: 'warn',
 
   create(context: RuleContext) {
+    const tracker = new ScopeTracker();
+
     const allocations: {
       name: string | null;
       isHandledExternally: boolean;
       isCollection: boolean;
       node: any;
+      scopeId: number;
     }[] = [];
-    const abortedNames = new Set<string>();
 
     return {
-      NewExpression(node: any, parent: any) {
-        if (node.callee.type === 'Identifier' && node.callee.name === 'AbortController') {
-          const target = getAllocationTarget(parent);
-          allocations.push({
-            name: target.name,
-            isHandledExternally: target.isHandledExternally,
-            isCollection: target.isCollection,
-            node,
-          });
-        }
-      },
-
-      CallExpression(node: any) {
-        if (node.callee.type === 'MemberExpression' && node.callee.property.type === 'Identifier') {
-          if (node.callee.property.name === 'abort') {
-            const abortedName = getExpressionName(node.callee.object);
-            if (abortedName) abortedNames.add(abortedName);
-          }
-        }
+      Program() {
+        tracker.enterRootScope();
       },
 
       'Program:exit'() {
@@ -53,7 +39,7 @@ export const noMissingAbortControllerRule: RuleDefinition = {
             continue;
           }
 
-          if (!abortedNames.has(alloc.name)) {
+          if (!tracker.isCleared(alloc.name, alloc.scopeId)) {
             context.report({
               ruleId: 'generic/no-missing-abort-controller',
               message: `AbortController '${alloc.name}' is instantiated but .abort() is never called.`,
@@ -64,6 +50,37 @@ export const noMissingAbortControllerRule: RuleDefinition = {
           }
         }
       },
+
+      NewExpression(node: any, parent: any) {
+        if (node.callee.type === 'Identifier' && node.callee.name === 'AbortController') {
+          const target = getAllocationTarget(parent);
+          const alloc = {
+            name: target.name,
+            isHandledExternally: target.isHandledExternally,
+            isCollection: target.isCollection,
+            node,
+            scopeId: tracker.currentScopeId(),
+          };
+          allocations.push(alloc);
+          if (target.name) tracker.addAllocation(target.name);
+        }
+      },
+
+      CallExpression(node: any) {
+        if (node.callee.type === 'MemberExpression' && node.callee.property.type === 'Identifier') {
+          if (node.callee.property.name === 'abort') {
+            const abortedName = getExpressionName(node.callee.object);
+            if (abortedName) tracker.addClearance(abortedName);
+          }
+        }
+      },
+
+      FunctionDeclaration: () => tracker.enterScope(),
+      'FunctionDeclaration:exit': () => tracker.leaveScope(),
+      FunctionExpression: () => tracker.enterScope(),
+      'FunctionExpression:exit': () => tracker.leaveScope(),
+      ArrowFunctionExpression: () => tracker.enterScope(),
+      'ArrowFunctionExpression:exit': () => tracker.leaveScope(),
     };
   },
 };

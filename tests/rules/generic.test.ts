@@ -48,6 +48,34 @@ describe('no-uncleared-timers', () => {
     });
     expect(diagnostics).toHaveLength(0);
   });
+
+  it('flags uncleared timer in one function even if another function clears the same variable name', () => {
+    const code = `
+      function clean() {
+        const timerId = setInterval(() => {}, 1000);
+        clearInterval(timerId);
+      }
+      function leaked() {
+        const timerId = setInterval(() => {}, 1000);
+      }
+    `;
+    const diagnostics = runRule(noUnclearedTimersRule, code);
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0].message).toContain('timerId');
+    expect(diagnostics[0].message).toContain('never cleared');
+  });
+
+  it('allows allocation in function cleared by outer scope via variable pass-through', () => {
+    const code = `
+      let timerId;
+      function setup() {
+        timerId = setInterval(() => {}, 1000);
+      }
+      clearInterval(timerId);
+    `;
+    const diagnostics = runRule(noUnclearedTimersRule, code);
+    expect(diagnostics).toHaveLength(0);
+  });
 });
 
 describe('no-uncleared-animation-frames', () => {
@@ -107,6 +135,22 @@ describe('no-unregistered-listeners', () => {
     const diagnostics = runRule(noUnregisteredListenersRule, `el.addEventListener('click', () => {});`);
     expect(diagnostics).toHaveLength(0);
   });
+
+  it('flags listener in one function even if another function removes the same handler name', () => {
+    const code = `
+      function setup() {
+        const handler = () => {};
+        document.addEventListener('click', handler);
+      }
+      function teardown() {
+        const handler = () => {};
+        document.removeEventListener('click', handler);
+      }
+    `;
+    const diagnostics = runRule(noUnregisteredListenersRule, code);
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0].message).toContain('never removed');
+  });
 });
 
 describe('no-unconnected-observers', () => {
@@ -131,6 +175,21 @@ describe('no-unconnected-observers', () => {
     expect(diagnostics).toHaveLength(1);
     expect(diagnostics[0].message).toContain('without being assigned');
   });
+
+  it('flags observer in one function even if another disconnects the same variable name', () => {
+    const code = `
+      function setup() {
+        const obs = new IntersectionObserver(() => {});
+      }
+      function teardown() {
+        const obs = new IntersectionObserver(() => {});
+        obs.disconnect();
+      }
+    `;
+    const diagnostics = runRule(noUnconnectedObserversRule, code);
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0].message).toContain('disconnect');
+  });
 });
 
 describe('no-unclosed-websockets', () => {
@@ -154,6 +213,21 @@ describe('no-unclosed-websockets', () => {
     const code = `sockets.push(new WebSocket('ws://localhost'));`;
     const diagnostics = runRule(noUnclosedWebsocketsRule, code);
     expect(diagnostics).toHaveLength(0);
+  });
+
+  it('flags WebSocket in one function even if another closes the same variable name', () => {
+    const code = `
+      function open() {
+        const ws = new WebSocket('ws://localhost');
+      }
+      function close() {
+        const ws = new WebSocket('ws://localhost');
+        ws.close();
+      }
+    `;
+    const diagnostics = runRule(noUnclosedWebsocketsRule, code);
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0].message).toContain('.close() is never called');
   });
 });
 

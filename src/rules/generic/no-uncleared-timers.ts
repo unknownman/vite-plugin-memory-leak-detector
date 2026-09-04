@@ -1,5 +1,6 @@
 import type { RuleContext, RuleDefinition } from '../../types/rule.js';
 import { getExpressionName, getAllocationTarget } from '../utils/tracker.js';
+import { ScopeTracker } from '../utils/scope.js';
 
 export const noUnclearedTimersRule: RuleDefinition = {
   id: 'generic/no-uncleared-timers',
@@ -8,41 +9,20 @@ export const noUnclearedTimersRule: RuleDefinition = {
   defaultSeverity: 'warn',
 
   create(context: RuleContext) {
+    const tracker = new ScopeTracker();
+
     const allocations: {
       type: string;
       name: string | null;
       node: any;
       isHandledExternally: boolean;
       isCollection: boolean;
+      scopeId: number;
     }[] = [];
-    const clearedNames = new Set<string>();
 
     return {
-      CallExpression(node: any, parent: any) {
-        const callee = node.callee;
-        let name = '';
-
-        if (callee.type === 'Identifier') name = callee.name;
-        else if (callee.type === 'MemberExpression' && callee.property.type === 'Identifier') {
-          name = callee.property.name;
-        }
-
-        if (!name || context.isAllowlisted(name, callee.type === 'Identifier' ? 'function' : 'method')) return;
-
-        if (['setInterval', 'setTimeout'].includes(name)) {
-          const target = getAllocationTarget(parent);
-          allocations.push({
-            type: name,
-            name: target.name,
-            isHandledExternally: target.isHandledExternally,
-            isCollection: target.isCollection,
-            node,
-          });
-        } else if (['clearInterval', 'clearTimeout'].includes(name)) {
-          const arg = node.arguments[0];
-          const clearedName = getExpressionName(arg);
-          if (clearedName) clearedNames.add(clearedName);
-        }
+      Program() {
+        tracker.enterRootScope();
       },
 
       'Program:exit'() {
@@ -61,7 +41,7 @@ export const noUnclearedTimersRule: RuleDefinition = {
             continue;
           }
 
-          if (!clearedNames.has(alloc.name)) {
+          if (!tracker.isCleared(alloc.name, alloc.scopeId)) {
             context.report({
               ruleId: 'generic/no-uncleared-timers',
               message: `Timer '${alloc.name}' (${alloc.type}) is allocated but never cleared.`,
@@ -72,6 +52,43 @@ export const noUnclearedTimersRule: RuleDefinition = {
           }
         }
       },
+
+      CallExpression(node: any, parent: any) {
+        const callee = node.callee;
+        let name = '';
+
+        if (callee.type === 'Identifier') name = callee.name;
+        else if (callee.type === 'MemberExpression' && callee.property.type === 'Identifier') {
+          name = callee.property.name;
+        }
+
+        if (!name || context.isAllowlisted(name, callee.type === 'Identifier' ? 'function' : 'method')) return;
+
+        if (['setInterval', 'setTimeout'].includes(name)) {
+          const target = getAllocationTarget(parent);
+          const alloc = {
+            type: name,
+            name: target.name,
+            isHandledExternally: target.isHandledExternally,
+            isCollection: target.isCollection,
+            node,
+            scopeId: tracker.currentScopeId(),
+          };
+          allocations.push(alloc);
+          if (target.name) tracker.addAllocation(target.name);
+        } else if (['clearInterval', 'clearTimeout'].includes(name)) {
+          const arg = node.arguments[0];
+          const clearedName = getExpressionName(arg);
+          if (clearedName) tracker.addClearance(clearedName);
+        }
+      },
+
+      FunctionDeclaration: () => tracker.enterScope(),
+      'FunctionDeclaration:exit': () => tracker.leaveScope(),
+      FunctionExpression: () => tracker.enterScope(),
+      'FunctionExpression:exit': () => tracker.leaveScope(),
+      ArrowFunctionExpression: () => tracker.enterScope(),
+      'ArrowFunctionExpression:exit': () => tracker.leaveScope(),
     };
   },
 };

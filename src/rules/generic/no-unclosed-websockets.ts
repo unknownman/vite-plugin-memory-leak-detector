@@ -1,5 +1,6 @@
 import type { RuleContext, RuleDefinition } from '../../types/rule.js';
 import { getExpressionName, getAllocationTarget } from '../utils/tracker.js';
+import { ScopeTracker } from '../utils/scope.js';
 
 export const noUnclosedWebsocketsRule: RuleDefinition = {
   id: 'generic/no-unclosed-websockets',
@@ -8,38 +9,20 @@ export const noUnclosedWebsocketsRule: RuleDefinition = {
   defaultSeverity: 'warn',
 
   create(context: RuleContext) {
+    const tracker = new ScopeTracker();
+
     const allocations: {
       name: string | null;
       type: string;
       isHandledExternally: boolean;
       isCollection: boolean;
       node: any;
+      scopeId: number;
     }[] = [];
-    const closedNames = new Set<string>();
 
     return {
-      NewExpression(node: any, parent: any) {
-        if (node.callee.type === 'Identifier' && ['WebSocket', 'EventSource'].includes(node.callee.name)) {
-          const type = node.callee.name;
-          const target = getAllocationTarget(parent);
-
-          allocations.push({
-            name: target.name,
-            type,
-            isHandledExternally: target.isHandledExternally,
-            isCollection: target.isCollection,
-            node,
-          });
-        }
-      },
-
-      CallExpression(node: any) {
-        if (node.callee.type === 'MemberExpression' && node.callee.property.type === 'Identifier') {
-          if (node.callee.property.name === 'close') {
-            const closedName = getExpressionName(node.callee.object);
-            if (closedName) closedNames.add(closedName);
-          }
-        }
+      Program() {
+        tracker.enterRootScope();
       },
 
       'Program:exit'() {
@@ -57,7 +40,7 @@ export const noUnclosedWebsocketsRule: RuleDefinition = {
             continue;
           }
 
-          if (!closedNames.has(alloc.name)) {
+          if (!tracker.isCleared(alloc.name, alloc.scopeId)) {
             context.report({
               ruleId: 'generic/no-unclosed-websockets',
               message: `Connection '${alloc.name}' (${alloc.type}) is created but .close() is never called.`,
@@ -68,6 +51,40 @@ export const noUnclosedWebsocketsRule: RuleDefinition = {
           }
         }
       },
+
+      NewExpression(node: any, parent: any) {
+        if (node.callee.type === 'Identifier' && ['WebSocket', 'EventSource'].includes(node.callee.name)) {
+          const type = node.callee.name;
+          const target = getAllocationTarget(parent);
+
+          const alloc = {
+            name: target.name,
+            type,
+            isHandledExternally: target.isHandledExternally,
+            isCollection: target.isCollection,
+            node,
+            scopeId: tracker.currentScopeId(),
+          };
+          allocations.push(alloc);
+          if (target.name) tracker.addAllocation(target.name);
+        }
+      },
+
+      CallExpression(node: any) {
+        if (node.callee.type === 'MemberExpression' && node.callee.property.type === 'Identifier') {
+          if (node.callee.property.name === 'close') {
+            const closedName = getExpressionName(node.callee.object);
+            if (closedName) tracker.addClearance(closedName);
+          }
+        }
+      },
+
+      FunctionDeclaration: () => tracker.enterScope(),
+      'FunctionDeclaration:exit': () => tracker.leaveScope(),
+      FunctionExpression: () => tracker.enterScope(),
+      'FunctionExpression:exit': () => tracker.leaveScope(),
+      ArrowFunctionExpression: () => tracker.enterScope(),
+      'ArrowFunctionExpression:exit': () => tracker.leaveScope(),
     };
   },
 };

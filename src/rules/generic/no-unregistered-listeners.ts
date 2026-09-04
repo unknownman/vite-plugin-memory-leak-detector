@@ -1,5 +1,21 @@
 import type { RuleContext, RuleDefinition } from '../../types/rule.js';
 import { getExpressionName } from '../utils/tracker.js';
+import { ScopeTracker } from '../utils/scope.js';
+
+interface ListenerAdd {
+  target: string;
+  event: string;
+  handler: string | null;
+  node: any;
+  scopeId: number;
+}
+
+interface ListenerRemove {
+  target: string;
+  event: string;
+  handler: string | null;
+  scopeId: number;
+}
 
 export const noUnregisteredListenersRule: RuleDefinition = {
   id: 'generic/no-unregistered-listeners',
@@ -8,10 +24,50 @@ export const noUnregisteredListenersRule: RuleDefinition = {
   defaultSeverity: 'warn',
 
   create(context: RuleContext) {
-    const adds: { target: string; event: string; handler: string | null; node: any }[] = [];
-    const removes: { target: string; event: string; handler: string | null }[] = [];
+    const tracker = new ScopeTracker();
+    const adds: ListenerAdd[] = [];
+    const removes: ListenerRemove[] = [];
 
     return {
+      Program() {
+        tracker.enterRootScope();
+      },
+
+      'Program:exit'() {
+        for (const add of adds) {
+          if (!add.handler && ['window', 'document', 'document.body'].includes(add.target)) {
+            context.report({
+              ruleId: 'generic/no-unregistered-listeners',
+              message: `Anonymous event listener added to '${add.target}' for event '${add.event}'. Anonymous listeners cannot be removed.`,
+              suggestion: 'Extract the handler to a named function or variable so it can be passed to removeEventListener.',
+              line: add.node.loc?.start?.line ?? 1,
+              column: add.node.loc?.start?.column ?? 0,
+            });
+            continue;
+          }
+
+          if (add.handler) {
+            const hasMatchingRemove = removes.some(
+              (r) =>
+                tracker.isDescendantOrSame(r.scopeId, add.scopeId) &&
+                (r.target === add.target || r.target === 'global') &&
+                (r.event === add.event || r.event === '*') &&
+                r.handler === add.handler,
+            );
+
+            if (!hasMatchingRemove) {
+              context.report({
+                ruleId: 'generic/no-unregistered-listeners',
+                message: `Event listener '${add.handler}' for '${add.event}' on '${add.target}' is never removed.`,
+                suggestion: `Call ${add.target}.removeEventListener('${add.event}', ${add.handler}) on teardown.`,
+                line: add.node.loc?.start?.line ?? 1,
+                column: add.node.loc?.start?.column ?? 0,
+              });
+            }
+          }
+        }
+      },
+
       CallExpression(node: any) {
         const callee = node.callee;
         if (callee.type === 'MemberExpression' && callee.property.type === 'Identifier') {
@@ -27,49 +83,20 @@ export const noUnregisteredListenersRule: RuleDefinition = {
             const handler = getExpressionName(node.arguments[1]);
 
             if (method === 'addEventListener') {
-              adds.push({ target, event, handler, node });
+              adds.push({ target, event, handler, node, scopeId: tracker.currentScopeId() });
             } else {
-              removes.push({ target, event, handler });
+              removes.push({ target, event, handler, scopeId: tracker.currentScopeId() });
             }
           }
         }
       },
 
-      'Program:exit'() {
-        for (const add of adds) {
-          // If they used an anonymous inline function on a persistent global target, it's an un-removable leak.
-          if (!add.handler && ['window', 'document', 'document.body'].includes(add.target)) {
-            context.report({
-              ruleId: 'generic/no-unregistered-listeners',
-              message: `Anonymous event listener added to '${add.target}' for event '${add.event}'. Anonymous listeners cannot be removed.`,
-              suggestion: 'Extract the handler to a named function or variable so it can be passed to removeEventListener.',
-              line: add.node.loc?.start?.line ?? 1,
-              column: add.node.loc?.start?.column ?? 0,
-            });
-            continue;
-          }
-
-          // If the handler is tracked, look for an exact matching removal
-          if (add.handler) {
-            const hasMatchingRemove = removes.some(
-              (r) =>
-                (r.target === add.target || r.target === 'global') &&
-                (r.event === add.event || r.event === '*') &&
-                r.handler === add.handler
-            );
-
-            if (!hasMatchingRemove) {
-              context.report({
-                ruleId: 'generic/no-unregistered-listeners',
-                message: `Event listener '${add.handler}' for '${add.event}' on '${add.target}' is never removed.`,
-                suggestion: `Call ${add.target}.removeEventListener('${add.event}', ${add.handler}) on teardown.`,
-                line: add.node.loc?.start?.line ?? 1,
-                column: add.node.loc?.start?.column ?? 0,
-              });
-            }
-          }
-        }
-      },
+      FunctionDeclaration: () => tracker.enterScope(),
+      'FunctionDeclaration:exit': () => tracker.leaveScope(),
+      FunctionExpression: () => tracker.enterScope(),
+      'FunctionExpression:exit': () => tracker.leaveScope(),
+      ArrowFunctionExpression: () => tracker.enterScope(),
+      'ArrowFunctionExpression:exit': () => tracker.leaveScope(),
     };
   },
 };

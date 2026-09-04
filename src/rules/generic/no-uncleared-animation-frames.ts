@@ -1,5 +1,6 @@
 import type { RuleContext, RuleDefinition } from '../../types/rule.js';
 import { getExpressionName, getAllocationTarget } from '../utils/tracker.js';
+import { ScopeTracker } from '../utils/scope.js';
 
 export const noUnclearedAnimationFramesRule: RuleDefinition = {
   id: 'generic/no-uncleared-animation-frames',
@@ -8,39 +9,19 @@ export const noUnclearedAnimationFramesRule: RuleDefinition = {
   defaultSeverity: 'warn',
 
   create(context: RuleContext) {
+    const tracker = new ScopeTracker();
+
     const allocations: {
       name: string | null;
       node: any;
       isHandledExternally: boolean;
       isCollection: boolean;
+      scopeId: number;
     }[] = [];
-    const canceledNames = new Set<string>();
 
     return {
-      CallExpression(node: any, parent: any) {
-        const callee = node.callee;
-        let name = '';
-
-        if (callee.type === 'Identifier') name = callee.name;
-        else if (callee.type === 'MemberExpression' && callee.property.type === 'Identifier') {
-          name = callee.property.name;
-        }
-
-        if (!name || context.isAllowlisted(name, callee.type === 'Identifier' ? 'function' : 'method')) return;
-
-        if (name === 'requestAnimationFrame') {
-          const target = getAllocationTarget(parent);
-          allocations.push({
-            name: target.name,
-            isHandledExternally: target.isHandledExternally,
-            isCollection: target.isCollection,
-            node,
-          });
-        } else if (name === 'cancelAnimationFrame') {
-          const arg = node.arguments[0];
-          const canceledName = getExpressionName(arg);
-          if (canceledName) canceledNames.add(canceledName);
-        }
+      Program() {
+        tracker.enterRootScope();
       },
 
       'Program:exit'() {
@@ -58,7 +39,7 @@ export const noUnclearedAnimationFramesRule: RuleDefinition = {
             continue;
           }
 
-          if (!canceledNames.has(alloc.name)) {
+          if (!tracker.isCleared(alloc.name, alloc.scopeId)) {
             context.report({
               ruleId: 'generic/no-uncleared-animation-frames',
               message: `Animation frame ID '${alloc.name}' is allocated but never canceled.`,
@@ -69,6 +50,42 @@ export const noUnclearedAnimationFramesRule: RuleDefinition = {
           }
         }
       },
+
+      CallExpression(node: any, parent: any) {
+        const callee = node.callee;
+        let name = '';
+
+        if (callee.type === 'Identifier') name = callee.name;
+        else if (callee.type === 'MemberExpression' && callee.property.type === 'Identifier') {
+          name = callee.property.name;
+        }
+
+        if (!name || context.isAllowlisted(name, callee.type === 'Identifier' ? 'function' : 'method')) return;
+
+        if (name === 'requestAnimationFrame') {
+          const target = getAllocationTarget(parent);
+          const alloc = {
+            name: target.name,
+            isHandledExternally: target.isHandledExternally,
+            isCollection: target.isCollection,
+            node,
+            scopeId: tracker.currentScopeId(),
+          };
+          allocations.push(alloc);
+          if (target.name) tracker.addAllocation(target.name);
+        } else if (name === 'cancelAnimationFrame') {
+          const arg = node.arguments[0];
+          const canceledName = getExpressionName(arg);
+          if (canceledName) tracker.addClearance(canceledName);
+        }
+      },
+
+      FunctionDeclaration: () => tracker.enterScope(),
+      'FunctionDeclaration:exit': () => tracker.leaveScope(),
+      FunctionExpression: () => tracker.enterScope(),
+      'FunctionExpression:exit': () => tracker.leaveScope(),
+      ArrowFunctionExpression: () => tracker.enterScope(),
+      'ArrowFunctionExpression:exit': () => tracker.leaveScope(),
     };
   },
 };

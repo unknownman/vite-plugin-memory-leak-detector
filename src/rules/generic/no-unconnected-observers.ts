@@ -1,5 +1,6 @@
 import type { RuleContext, RuleDefinition } from '../../types/rule.js';
 import { getExpressionName, getAllocationTarget } from '../utils/tracker.js';
+import { ScopeTracker } from '../utils/scope.js';
 
 export const noUnconnectedObserversRule: RuleDefinition = {
   id: 'generic/no-unconnected-observers',
@@ -8,41 +9,20 @@ export const noUnconnectedObserversRule: RuleDefinition = {
   defaultSeverity: 'warn',
 
   create(context: RuleContext) {
+    const tracker = new ScopeTracker();
+
     const allocations: {
       name: string | null;
       type: string;
       isHandledExternally: boolean;
       isCollection: boolean;
       node: any;
+      scopeId: number;
     }[] = [];
-    const disconnectedNames = new Set<string>();
 
     return {
-      NewExpression(node: any, parent: any) {
-        if (node.callee.type === 'Identifier') {
-          const type = node.callee.name;
-          if (
-            ['IntersectionObserver', 'MutationObserver', 'ResizeObserver', 'PerformanceObserver'].includes(type)
-          ) {
-            const target = getAllocationTarget(parent);
-            allocations.push({
-              name: target.name,
-              type,
-              isHandledExternally: target.isHandledExternally,
-              isCollection: target.isCollection,
-              node,
-            });
-          }
-        }
-      },
-
-      CallExpression(node: any) {
-        if (node.callee.type === 'MemberExpression' && node.callee.property.type === 'Identifier') {
-          if (node.callee.property.name === 'disconnect') {
-            const disconnectedName = getExpressionName(node.callee.object);
-            if (disconnectedName) disconnectedNames.add(disconnectedName);
-          }
-        }
+      Program() {
+        tracker.enterRootScope();
       },
 
       'Program:exit'() {
@@ -60,7 +40,7 @@ export const noUnconnectedObserversRule: RuleDefinition = {
             continue;
           }
 
-          if (!disconnectedNames.has(alloc.name)) {
+          if (!tracker.isCleared(alloc.name, alloc.scopeId)) {
             context.report({
               ruleId: 'generic/no-unconnected-observers',
               message: `Observer '${alloc.name}' (${alloc.type}) is created but .disconnect() is never called.`,
@@ -71,6 +51,43 @@ export const noUnconnectedObserversRule: RuleDefinition = {
           }
         }
       },
+
+      NewExpression(node: any, parent: any) {
+        if (node.callee.type === 'Identifier') {
+          const type = node.callee.name;
+          if (
+            ['IntersectionObserver', 'MutationObserver', 'ResizeObserver', 'PerformanceObserver'].includes(type)
+          ) {
+            const target = getAllocationTarget(parent);
+            const alloc = {
+              name: target.name,
+              type,
+              isHandledExternally: target.isHandledExternally,
+              isCollection: target.isCollection,
+              node,
+              scopeId: tracker.currentScopeId(),
+            };
+            allocations.push(alloc);
+            if (target.name) tracker.addAllocation(target.name);
+          }
+        }
+      },
+
+      CallExpression(node: any) {
+        if (node.callee.type === 'MemberExpression' && node.callee.property.type === 'Identifier') {
+          if (node.callee.property.name === 'disconnect') {
+            const disconnectedName = getExpressionName(node.callee.object);
+            if (disconnectedName) tracker.addClearance(disconnectedName);
+          }
+        }
+      },
+
+      FunctionDeclaration: () => tracker.enterScope(),
+      'FunctionDeclaration:exit': () => tracker.leaveScope(),
+      FunctionExpression: () => tracker.enterScope(),
+      'FunctionExpression:exit': () => tracker.leaveScope(),
+      ArrowFunctionExpression: () => tracker.enterScope(),
+      'ArrowFunctionExpression:exit': () => tracker.leaveScope(),
     };
   },
 };
