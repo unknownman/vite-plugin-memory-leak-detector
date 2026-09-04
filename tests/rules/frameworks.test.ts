@@ -78,6 +78,18 @@ describe('react/react-useeffect-cleanup', () => {
     expect(diagnostics[0].message).toContain('does not return a cleanup function');
   });
 
+  it('does not treat an early return without a value as cleanup', () => {
+    const code = `
+      useEffect(() => {
+        if (!ready) return;
+        const id = setInterval(tick, 1000);
+      }, [ready]);
+    `;
+    const diagnostics = runRule(reactUseEffectCleanupRule, code);
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0].message).toContain('does not return a cleanup function');
+  });
+
   it('suppresses warning when returning () => clearInterval(id)', () => {
     const code = `
       useEffect(() => {
