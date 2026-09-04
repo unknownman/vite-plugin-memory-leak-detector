@@ -4,6 +4,14 @@
   "description": "A Vite plugin to detect potential memory leaks in frontend code at build time.",
   "author": "You",
   "license": "MIT",
+  "homepage": "https://github.com/unknownman/vite-plugin-memory-leak-detector#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/unknownman/vite-plugin-memory-leak-detector.git"
+  },
+  "bugs": {
+    "url": "https://github.com/unknownman/vite-plugin-memory-leak-detector/issues"
+  },
   "type": "module",
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
@@ -16,8 +24,13 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "README.md",
+    "CHANGELOG.md"
   ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
   "scripts": {
     "build": "tsup",
     "dev": "tsup --watch",
@@ -52,6 +65,10 @@
     "static-analysis",
     "performance",
     "ast",
-    "oxc"
+    "oxc",
+    "react",
+    "vue",
+    "svelte",
+    "solid"
   ]
 }

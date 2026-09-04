@@ -295,6 +295,24 @@ npm run test:watch
 npm run test:coverage
 ```
 
+## Security
+
+`vite-plugin-memory-leak-detector` is a **static analysis tool**.
+
+- It **does not** execute your source code.
+- It **does not** collect, transmit, or phone-home any data.
+- It is entirely safe to run in isolated, air-gapped CI/CD environments.
+
+All AST parsing is done locally using `oxc-parser`.
+
+## Performance Considerations
+
+Adding AST analysis to a bundler can sometimes slow down development. We engineered this plugin to have an imperceptible footprint:
+
+1. **Rust Parser**: We use `oxc-parser`, which is drastically faster than Babel or Acorn.
+2. **Vite Cache**: During `vite dev`, the plugin leverages Vite's internal module cache. It only re-analyzes files that you actually modify and save.
+3. **Single-Pass Traversal**: Whether you have 2 rules enabled or 50, the `estree-walker` engine only traverses the AST of a file exactly *once*, executing all rules simultaneously.
+
 ## License
 
 MIT License
