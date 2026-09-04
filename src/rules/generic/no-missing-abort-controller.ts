@@ -51,9 +51,9 @@ export const noMissingAbortControllerRule: RuleDefinition = {
         }
       },
 
-      NewExpression(node: any, parent: any) {
+      NewExpression(node: any, parent: any, ancestors?: any[]) {
         if (node.callee.type === 'Identifier' && node.callee.name === 'AbortController') {
-          const target = getAllocationTarget(parent);
+          const target = getAllocationTarget(parent, ancestors);
           const alloc = {
             name: target.name,
             isHandledExternally: target.isHandledExternally,

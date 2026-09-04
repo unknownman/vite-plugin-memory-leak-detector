@@ -51,7 +51,7 @@ export const noUnclearedAnimationFramesRule: RuleDefinition = {
         }
       },
 
-      CallExpression(node: any, parent: any) {
+      CallExpression(node: any, parent: any, ancestors?: any[]) {
         const callee = node.callee;
         let name = '';
 
@@ -63,7 +63,7 @@ export const noUnclearedAnimationFramesRule: RuleDefinition = {
         if (!name || context.isAllowlisted(name, callee.type === 'Identifier' ? 'function' : 'method')) return;
 
         if (name === 'requestAnimationFrame') {
-          const target = getAllocationTarget(parent);
+          const target = getAllocationTarget(parent, ancestors);
           const alloc = {
             name: target.name,
             isHandledExternally: target.isHandledExternally,

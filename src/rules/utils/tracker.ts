@@ -30,43 +30,90 @@ export interface AllocationTarget {
   isCollection: boolean;
 }
 
+const PASS_THROUGH_TYPES = new Set([
+  'ConditionalExpression',
+  'LogicalExpression',
+  'TSAsExpression',
+  'TSTypeAssertion',
+  'TSNonNullExpression',
+  'ParenthesizedExpression',
+  'SequenceExpression',
+]);
+
 /**
- * Looks at the parent node of an allocation (like a setInterval call)
- * to determine where the result is being stored.
+ * Looks at the parent node (or ancestor chain) of an allocation (like a setInterval call)
+ * to determine where the result is being stored, traversing through conditionals,
+ * logical operators, and type assertions.
  */
-export function getAllocationTarget(parent: any): AllocationTarget {
-  if (!parent) return { name: null, isHandledExternally: false, isCollection: false };
-
-  // const id = setInterval(...)
-  if (parent.type === 'VariableDeclarator') {
-    return { name: getExpressionName(parent.id), isHandledExternally: false, isCollection: false };
+export function getAllocationTarget(parent: any, ancestors?: any[]): AllocationTarget {
+  if (!parent && (!ancestors || ancestors.length === 0)) {
+    return { name: null, isHandledExternally: false, isCollection: false };
   }
 
-  // this.id = setInterval(...)
-  if (parent.type === 'AssignmentExpression') {
-    return { name: getExpressionName(parent.left), isHandledExternally: false, isCollection: false };
-  }
-
-  // return setInterval(...)
-  if (parent.type === 'ReturnStatement' || parent.type === 'ArrowFunctionExpression') {
-    return { name: null, isHandledExternally: true, isCollection: false };
-  }
-
-  // myTimers.push(setInterval(...)) or register(setInterval(...))
-  if (parent.type === 'CallExpression') {
-    if (parent.callee.type === 'MemberExpression') {
-      const prop = parent.callee.property.name || parent.callee.property.value;
-      if (['push', 'add', 'set', 'insert'].includes(prop)) {
-        return { name: getExpressionName(parent.callee.object), isHandledExternally: false, isCollection: true };
-      }
+  // Build the list of nodes starting from the immediate parent walking upwards
+  const chain: any[] = [];
+  if (ancestors && Array.isArray(ancestors) && ancestors.length > 0) {
+    for (let i = ancestors.length - 1; i >= 0; i--) {
+      chain.push(ancestors[i]);
     }
-    // If it's passed as an argument to a function, we assume the function handles it.
-    return { name: null, isHandledExternally: true, isCollection: false };
+    if (parent && chain[0] !== parent) {
+      chain.unshift(parent);
+    }
+  } else if (parent) {
+    let curr = parent;
+    while (curr) {
+      chain.push(curr);
+      curr = curr.parent;
+    }
   }
 
-  // { timer: setInterval(...) }
-  if (parent.type === 'Property') {
-    return { name: getExpressionName(parent.key), isHandledExternally: false, isCollection: true };
+  for (const curr of chain) {
+    if (!curr || typeof curr !== 'object') continue;
+
+    // const id = setInterval(...)
+    if (curr.type === 'VariableDeclarator') {
+      return { name: getExpressionName(curr.id), isHandledExternally: false, isCollection: false };
+    }
+
+    // this.id = setInterval(...)
+    if (curr.type === 'AssignmentExpression') {
+      return { name: getExpressionName(curr.left), isHandledExternally: false, isCollection: false };
+    }
+
+    // return setInterval(...)
+    if (curr.type === 'ReturnStatement' || curr.type === 'ArrowFunctionExpression') {
+      return { name: null, isHandledExternally: true, isCollection: false };
+    }
+
+    // myTimers.push(setInterval(...)) or register(setInterval(...))
+    if (curr.type === 'CallExpression') {
+      if (curr.callee.type === 'MemberExpression') {
+        const prop = curr.callee.property.name || curr.callee.property.value;
+        if (['push', 'add', 'set', 'insert'].includes(prop)) {
+          return { name: getExpressionName(curr.callee.object), isHandledExternally: false, isCollection: true };
+        }
+      }
+      // If it's passed as an argument to a function, we assume the function handles it.
+      return { name: null, isHandledExternally: true, isCollection: false };
+    }
+
+    // { timer: setInterval(...) }
+    if (curr.type === 'Property') {
+      return { name: getExpressionName(curr.key), isHandledExternally: false, isCollection: true };
+    }
+
+    // Pass through conditionals, logical expressions, and type wrappers
+    if (PASS_THROUGH_TYPES.has(curr.type)) {
+      continue;
+    }
+
+    // If we hit any statement or declaration boundary, or an unhandled expression, stop.
+    if (curr.type.endsWith('Statement') || curr.type.endsWith('Declaration') || curr.type === 'Program') {
+      break;
+    }
+
+    // Any other node type that is not a pass-through stops the chain
+    break;
   }
 
   return { name: null, isHandledExternally: false, isCollection: false };

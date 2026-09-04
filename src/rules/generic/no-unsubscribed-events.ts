@@ -52,12 +52,12 @@ export const noUnsubscribedEventsRule: RuleDefinition = {
         }
       },
 
-      CallExpression(node: any, parent: any) {
+      CallExpression(node: any, parent: any, ancestors?: any[]) {
         if (node.callee.type === 'MemberExpression' && node.callee.property.type === 'Identifier') {
           const method = node.callee.property.name;
 
           if (method === 'subscribe' || method === 'on') {
-            const target = getAllocationTarget(parent);
+            const target = getAllocationTarget(parent, ancestors);
             const alloc = {
               name: target.name,
               method,

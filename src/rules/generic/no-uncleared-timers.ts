@@ -53,7 +53,7 @@ export const noUnclearedTimersRule: RuleDefinition = {
         }
       },
 
-      CallExpression(node: any, parent: any) {
+      CallExpression(node: any, parent: any, ancestors?: any[]) {
         const callee = node.callee;
         let name = '';
 
@@ -65,7 +65,7 @@ export const noUnclearedTimersRule: RuleDefinition = {
         if (!name || context.isAllowlisted(name, callee.type === 'Identifier' ? 'function' : 'method')) return;
 
         if (['setInterval', 'setTimeout'].includes(name)) {
-          const target = getAllocationTarget(parent);
+          const target = getAllocationTarget(parent, ancestors);
           const alloc = {
             type: name,
             name: target.name,

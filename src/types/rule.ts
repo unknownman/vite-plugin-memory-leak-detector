@@ -24,7 +24,7 @@ export type RuleVisitor = {
    * Matches an ESTree AST node type.
    * Append `:exit` to the node type name to visit during the leave phase.
    */
-  [nodeType: string]: (node: any, parent: any) => void;
+  [nodeType: string]: (node: any, parent: any, ancestors?: any[]) => void;
 };
 
 export interface RuleDefinition {

@@ -30,6 +30,38 @@ describe('no-uncleared-timers', () => {
     expect(diagnostics).toHaveLength(0);
   });
 
+  it('allows setInterval inside ternary when assigned and cleared', () => {
+    const code = `
+      const id = ready ? setInterval() : null;
+      clearInterval(id);
+    `;
+    const diagnostics = runRule(noUnclearedTimersRule, code);
+    expect(diagnostics).toHaveLength(0);
+  });
+
+  it('detects unassigned setInterval inside a ternary', () => {
+    const code = `ready ? setInterval() : null;`;
+    const diagnostics = runRule(noUnclearedTimersRule, code);
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0].message).toContain('never assigned to a variable');
+  });
+
+  it('detects uncleared setInterval inside a ternary', () => {
+    const code = `const id = ready ? setInterval() : null;`;
+    const diagnostics = runRule(noUnclearedTimersRule, code);
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0].message).toContain("Timer 'id' (setInterval) is allocated but never cleared");
+  });
+
+  it('allows setInterval wrapped in logical expression and type casting when cleared', () => {
+    const code = `
+      const id = (ready && setInterval()) as number;
+      clearInterval(id);
+    `;
+    const diagnostics = runRule(noUnclearedTimersRule, code);
+    expect(diagnostics).toHaveLength(0);
+  });
+
   it('skips setTimeout (fire-and-forget)', () => {
     const diagnostics = runRule(noUnclearedTimersRule, `setTimeout(() => {}, 1000);`);
     expect(diagnostics).toHaveLength(0);

@@ -52,10 +52,10 @@ export const noUnclosedWebsocketsRule: RuleDefinition = {
         }
       },
 
-      NewExpression(node: any, parent: any) {
+      NewExpression(node: any, parent: any, ancestors?: any[]) {
         if (node.callee.type === 'Identifier' && ['WebSocket', 'EventSource'].includes(node.callee.name)) {
           const type = node.callee.name;
-          const target = getAllocationTarget(parent);
+          const target = getAllocationTarget(parent, ancestors);
 
           const alloc = {
             name: target.name,

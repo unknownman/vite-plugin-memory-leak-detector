@@ -37,13 +37,24 @@ export function runRule(
 
   const visitor = rule.create(context);
 
+  const ancestors: any[] = [];
   walk(ast, {
     enter(node: any, parent: any) {
-      if (visitor[node.type]) visitor[node.type](node, parent);
+      if (parent && node && typeof node === 'object' && !('parent' in node)) {
+        Object.defineProperty(node, 'parent', {
+          value: parent,
+          configurable: true,
+          writable: true,
+          enumerable: false,
+        });
+      }
+      if (visitor[node.type]) visitor[node.type](node, parent, ancestors);
+      ancestors.push(node);
     },
     leave(node: any, parent: any) {
+      ancestors.pop();
       const exitKey = `${node.type}:exit`;
-      if (visitor[exitKey]) visitor[exitKey](node, parent);
+      if (visitor[exitKey]) visitor[exitKey](node, parent, ancestors);
     },
   });
 
