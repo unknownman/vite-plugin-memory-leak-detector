@@ -80,7 +80,7 @@ export const noUnclearedTimersRule: RuleDefinition = {
         if (!name || context.isAllowlisted(name, callee.type === 'Identifier' ? 'function' : 'method')) return;
 
         if (['setInterval', 'setTimeout'].includes(name)) {
-          const target = getAllocationTarget(parent, ancestors);
+          const target = getAllocationTarget(parent, ancestors, context.isAllowlisted);
           const alloc = {
             type: name,
             name: target.name,

@@ -62,7 +62,10 @@ function getClearedName(node: any): string | null {
  *    removeEventListener, .close(), etc.).
  *  - hasValidCleanup: whether any ReturnStatement returns a function.
  */
-function checkEffectBody(effectBodyNode: any) {
+function checkEffectBody(
+  effectBodyNode: any,
+  isAllowlisted: (name: string, type: 'function' | 'method') => boolean
+) {
   const allocations: EffectAllocation[] = [];
   const clearanceNames = new Set<string>();
   let hasValidCleanup = false;
@@ -90,7 +93,7 @@ function checkEffectBody(effectBodyNode: any) {
             // be tracked or removed by name.
             allocName = getExpressionName(child.arguments[1]);
           } else {
-            const target = getAllocationTarget(parent);
+            const target = getAllocationTarget(parent, undefined, isAllowlisted);
             allocName = target.name;
             isHandledExternally = target.isHandledExternally;
             isCollection = target.isCollection;
@@ -113,7 +116,7 @@ function checkEffectBody(effectBodyNode: any) {
 
       if (child.type === 'NewExpression') {
         if (child.callee.type === 'Identifier' && LEAKY_CTORS.includes(child.callee.name)) {
-          const target = getAllocationTarget(parent);
+          const target = getAllocationTarget(parent, undefined, isAllowlisted);
           allocations.push({
             name: target.name,
             type: child.callee.name,
@@ -165,7 +168,10 @@ export const reactUseEffectCleanupRule: RuleDefinition = {
           ) {
             if (effectFn.body.type !== 'BlockStatement') return;
 
-            const { allocations, clearanceNames, hasValidCleanup } = checkEffectBody(effectFn.body);
+            const { allocations, clearanceNames, hasValidCleanup } = checkEffectBody(
+              effectFn.body,
+              context.isAllowlisted
+            );
 
             for (const alloc of allocations) {
               if (alloc.isHandledExternally || alloc.isCollection) continue;

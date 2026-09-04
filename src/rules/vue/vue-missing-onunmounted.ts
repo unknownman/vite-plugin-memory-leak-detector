@@ -108,7 +108,7 @@ export const vueMissingOnUnmountedRule: RuleDefinition = {
               : context.isAllowlisted(name, 'method');
 
           if (!isAllowlisted) {
-            const target = getAllocationTarget(parent);
+            const target = getAllocationTarget(parent, undefined, context.isAllowlisted);
             if (target.name && !target.isHandledExternally && !target.isCollection) {
               allocations.push({ name: target.name, node });
             }

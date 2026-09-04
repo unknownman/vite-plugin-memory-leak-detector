@@ -53,8 +53,16 @@ const PASS_THROUGH_TYPES = new Set([
  * Looks at the parent node (or ancestor chain) of an allocation (like a setInterval call)
  * to determine where the result is being stored, traversing through conditionals,
  * logical operators, and type assertions.
+ *
+ * `isAllowlisted` lets wrapper functions (e.g. `register(setInterval(...))`)
+ * count as "externally handled" only when the wrapper is explicitly allowlisted
+ * by the user. Everything else is treated as unhandled.
  */
-export function getAllocationTarget(parent: any, ancestors?: any[]): AllocationTarget {
+export function getAllocationTarget(
+  parent: any,
+  ancestors?: any[],
+  isAllowlisted?: (name: string, type: 'function' | 'method') => boolean
+): AllocationTarget {
   if (!parent && (!ancestors || ancestors.length === 0)) {
     return { name: null, isHandledExternally: false, isCollection: false };
   }
@@ -90,21 +98,21 @@ export function getAllocationTarget(parent: any, ancestors?: any[]): AllocationT
       return { name: null, isHandledExternally: true, isCollection: false };
     }
 
-    // myTimers.push(setInterval(...)) or register(setInterval(...))
+    // A wrapper call receiving the allocation. Only safe collection methods
+    // (push/add/set/insert) and explicitly allowlisted wrapper functions are
+    // treated as handled; anything else is conservatively flagged.
     if (curr.type === 'CallExpression') {
       if (curr.callee.type === 'MemberExpression') {
         const prop = curr.callee.property.name || curr.callee.property.value;
         if (['push', 'add', 'set', 'insert'].includes(prop)) {
           return { name: getExpressionName(curr.callee.object), isHandledExternally: false, isCollection: true };
         }
+        return { name: null, isHandledExternally: false, isCollection: false };
       }
-      // If it's passed as an argument to a function, we assume the function handles it.
-      return { name: null, isHandledExternally: true, isCollection: false };
-    }
-
-    // { timer: setInterval(...) }
-    if (curr.type === 'Property') {
-      return { name: getExpressionName(curr.key), isHandledExternally: false, isCollection: true };
+      if (curr.callee.type === 'Identifier' && isAllowlisted?.(curr.callee.name, 'function')) {
+        return { name: null, isHandledExternally: true, isCollection: false };
+      }
+      return { name: null, isHandledExternally: false, isCollection: false };
     }
 
     // Pass through conditionals, logical expressions, and type wrappers

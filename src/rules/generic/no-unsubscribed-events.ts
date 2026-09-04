@@ -72,7 +72,7 @@ export const noUnsubscribedEventsRule: RuleDefinition = {
           const method = node.callee.property.name;
 
           if (method === 'subscribe' || method === 'on') {
-            const target = getAllocationTarget(parent, ancestors);
+            const target = getAllocationTarget(parent, ancestors, context.isAllowlisted);
             const alloc = {
               name: target.name,
               method,

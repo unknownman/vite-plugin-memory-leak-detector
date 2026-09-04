@@ -70,7 +70,7 @@ export const noUnclosedWebsocketsRule: RuleDefinition = {
       NewExpression(node: any, parent: any, ancestors?: any[]) {
         if (node.callee.type === 'Identifier' && ['WebSocket', 'EventSource'].includes(node.callee.name)) {
           const type = node.callee.name;
-          const target = getAllocationTarget(parent, ancestors);
+          const target = getAllocationTarget(parent, ancestors, context.isAllowlisted);
 
           const alloc = {
             name: target.name,

@@ -73,7 +73,7 @@ export const noUnconnectedObserversRule: RuleDefinition = {
           if (
             ['IntersectionObserver', 'MutationObserver', 'ResizeObserver', 'PerformanceObserver'].includes(type)
           ) {
-            const target = getAllocationTarget(parent, ancestors);
+            const target = getAllocationTarget(parent, ancestors, context.isAllowlisted);
             const alloc = {
               name: target.name,
               type,

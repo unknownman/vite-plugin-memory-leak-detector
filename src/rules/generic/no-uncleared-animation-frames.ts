@@ -78,7 +78,7 @@ export const noUnclearedAnimationFramesRule: RuleDefinition = {
         if (!name || context.isAllowlisted(name, callee.type === 'Identifier' ? 'function' : 'method')) return;
 
         if (name === 'requestAnimationFrame') {
-          const target = getAllocationTarget(parent, ancestors);
+          const target = getAllocationTarget(parent, ancestors, context.isAllowlisted);
           const alloc = {
             name: target.name,
             isHandledExternally: target.isHandledExternally,

@@ -67,10 +67,45 @@ describe('no-uncleared-timers', () => {
     expect(diagnostics).toHaveLength(0);
   });
 
-  it('allows timers passed to external functions', () => {
+  it('allows timers pushed into collections', () => {
     const code = `myTimers.push(setInterval(() => {}, 1000));`;
     const diagnostics = runRule(noUnclearedTimersRule, code);
     expect(diagnostics).toHaveLength(0);
+  });
+
+  it('flags timers passed to console.log', () => {
+    const diagnostics = runRule(noUnclearedTimersRule, `console.log(setInterval(() => {}, 1000));`);
+    expect(diagnostics).toHaveLength(1);
+  });
+
+  it('flags timers passed to non-allowlisted wrapper functions', () => {
+    const diagnostics = runRule(noUnclearedTimersRule, `mySafeWrapper(setInterval(() => {}, 1000));`);
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0].message).toContain('never assigned to a variable');
+  });
+
+  it('flags timers passed to non-allowlisted member calls', () => {
+    const diagnostics = runRule(
+      noUnclearedTimersRule,
+      `manager.track(setInterval(() => {}, 1000));`
+    );
+    expect(diagnostics).toHaveLength(1);
+  });
+
+  it('allows timers passed to allowlisted wrapper functions', () => {
+    const code = `register(setInterval(() => {}, 1000));`;
+    const diagnostics = runRule(noUnclearedTimersRule, code, {
+      allowlist: { functions: ['register'] },
+    });
+    expect(diagnostics).toHaveLength(0);
+  });
+
+  it('flags timers stored as object literal properties', () => {
+    const diagnostics = runRule(
+      noUnclearedTimersRule,
+      `const cfg = { timer: setInterval(() => {}, 1000) };`
+    );
+    expect(diagnostics).toHaveLength(1);
   });
 
   it('allows allowlisted timers', () => {
