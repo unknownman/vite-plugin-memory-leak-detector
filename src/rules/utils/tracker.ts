@@ -13,14 +13,25 @@ export function getExpressionName(node: any): string | null {
 
   if (node.type === 'MemberExpression') {
     const obj = getExpressionName(node.object);
-    const prop = node.computed
-      ? node.property.type === 'Literal'
-        ? `[${node.property.value}]`
-        : null
-      : node.property.name || (node.property.type === 'Literal' ? node.property.value : null);
+    const prop = node.computed ? formatLiteralValue(node.property) : node.property.name || formatLiteralValue(node.property);
 
     if (obj && prop) return `${obj}.${prop}`;
   }
+  return null;
+}
+
+/**
+ * Reads a literal's value whether the node uses the ESTree `Literal` name or an
+ * oxc-specific name (`StringLiteral`, `NumericLiteral`, `BooleanLiteral`, ...).
+ * Returns `undefined` (via `''`) for non-literals so callers can fall back.
+ */
+function formatLiteralValue(node: any): string | null {
+  if (!node) return null;
+  const type = node.type;
+  if (type === 'Literal' || (typeof type === 'string' && type.endsWith('Literal'))) {
+    return node.value === null ? 'null' : `[${node.value}]`;
+  }
+  if (type === 'Identifier') return node.name;
   return null;
 }
 
@@ -141,6 +152,11 @@ export function getAllocationTarget(
         return { name: null, isHandledExternally: false, isCollection: false };
       }
       if (curr.callee.type === 'Identifier' && isAllowlisted?.(curr.callee.name, 'function')) {
+        return { name: null, isHandledExternally: true, isCollection: false };
+      }
+      // React state setters (setFoo(...)) take ownership of the value, so the
+      // resource is managed externally by the component state.
+      if (curr.callee.type === 'Identifier' && /^set[A-Z]/.test(curr.callee.name)) {
         return { name: null, isHandledExternally: true, isCollection: false };
       }
       return { name: null, isHandledExternally: false, isCollection: false };

@@ -24,6 +24,16 @@ const TEARDOWN_CALLS = new Set([
 const LEAKY_CALLS = new Set(['setInterval', 'addEventListener', 'subscribe']);
 
 /**
+ * Reactive wrappers whose inline callbacks run as part of the component's
+ * reactive lifecycle. Allocations made inside these (e.g.
+ * `watch(() => { const id = setInterval(...) })`) are still the component's
+ * responsibility and must be cleared in `onUnmounted`, so they are scanned.
+ * Plain DOM/event callbacks (e.g. `el.addEventListener('click', () => ...)`)
+ * remain out of scope for this rule.
+ */
+const REACTIVE_LEAK_CONTAINERS = ['watch', 'watchEffect', 'onMounted'];
+
+/**
  * Walks a teardown callback body, collecting the names of every resource it
  * explicitly clears into `clearedInHooks`.
  */
@@ -96,10 +106,14 @@ export const vueMissingOnUnmountedRule: RuleDefinition = {
           return;
         }
 
-        // Only track allocations made directly in the component setup scope.
-        // Allocations inside helper/utility functions, event callbacks, or
-        // lifecycle hooks are not the responsibility of this rule.
-        if (LEAKY_CALLS.has(name) && !tracker.isNestedInFunction()) {
+        // Track allocations made directly in the component setup scope, as well
+        // as allocations inside reactive wrappers (watch/watchEffect/onMounted).
+        // Allocations inside helper functions, event callbacks, or lifecycle
+        // hooks that are not reactive are not this rule's responsibility.
+        if (
+          LEAKY_CALLS.has(name) &&
+          (!tracker.isNestedInFunction() || tracker.isNestedInReactiveEffect(REACTIVE_LEAK_CONTAINERS))
+        ) {
           const isAllowlisted =
             callee.type === 'Identifier'
               ? context.isAllowlisted(name, 'function')

@@ -34,11 +34,13 @@ export class ScopeTracker {
   private clearances: RecordedClearance[] = [];
   private declaredVariables = new Map<number, Set<string>>();
   private scopeKinds = new Map<number, ScopeKind>();
+  private scopeTags = new Map<number, string | null>();
 
   /** Call at Program entry to create the root (module) scope. */
   enterRootScope() {
     const id = this.nextScopeId++;
     this.scopeKinds.set(id, 'function');
+    this.scopeTags.set(id, null);
     this.scopeStack.push(id);
     return id;
   }
@@ -47,11 +49,16 @@ export class ScopeTracker {
    * Enter a new scope boundary. Use `'function'` for function/arrow bodies and
    * `'block'` (default) for block statements so `let`/`const` shadowing is
    * modeled correctly.
+   *
+   * `tag` optionally records the CallExpression callee that introduced this
+   * scope (e.g. `watch`, `onMounted`, `createEffect`), so rules can tell apart
+   * reactive-effect wrappers from plain DOM/event callbacks.
    */
-  enterScope(kind: ScopeKind = 'block') {
+  enterScope(kind: ScopeKind = 'block', tag: string | null = null) {
     const id = this.nextScopeId++;
     this.parentMap.set(id, this.currentScopeId());
     this.scopeKinds.set(id, kind);
+    this.scopeTags.set(id, tag);
     this.scopeStack.push(id);
     return id;
   }
@@ -72,6 +79,21 @@ export class ScopeTracker {
   isNestedInFunction(): boolean {
     for (let i = 1; i < this.scopeStack.length; i++) {
       if (this.scopeKinds.get(this.scopeStack[i]) === 'function') return true;
+    }
+    return false;
+  }
+
+  /**
+   * Returns true when the current position is nested inside a function scope
+   * that was introduced as an argument to a CallExpression whose callee name
+   * appears in `allowlist` (e.g. `watch`, `onMounted`, `createEffect`). This
+   * lets framework rules scan reactive wrappers for leaks while still ignoring
+   * plain DOM/event callbacks.
+   */
+  isNestedInReactiveEffect(allowlist: string[]): boolean {
+    for (let i = 1; i < this.scopeStack.length; i++) {
+      const tag = this.scopeTags.get(this.scopeStack[i]);
+      if (tag && allowlist.includes(tag)) return true;
     }
     return false;
   }
@@ -127,8 +149,19 @@ export class ScopeTracker {
    * a lexical declaration (e.g. member-property targets like `this.timer`),
    * falls back to requiring the clearance to occur within the same scope
    * subtree as the allocation.
+   *
+   * Member expressions (`this.timer`, `ref.current`) are attached to an object
+   * or context that escapes strict local scope, so an exact string match
+   * anywhere in the file counts as cleared regardless of scope parentage.
    */
   isCleared(name: string, allocScopeId: number): boolean {
+    // Member expressions like `this.timer` or `ref.current` escape the strict
+    // lexical environment (they live on an object shared across scopes), so a
+    // same-named clearance anywhere in the file is sufficient.
+    if (name.includes('.') || name.includes('[')) {
+      return this.clearances.some((c) => c.name === name);
+    }
+
     const allocDeclScope = this.resolveDeclarationScope(name, allocScopeId);
 
     for (const c of this.clearances) {
@@ -176,6 +209,22 @@ const BLOCK_SCOPE_NODE_TYPES = ['BlockStatement', 'ForStatement', 'ForInStatemen
 const FUNCTION_SCOPE_NODE_TYPES = ['FunctionDeclaration', 'FunctionExpression', 'ArrowFunctionExpression'];
 
 /**
+ * When a function is passed as an argument to a CallExpression (e.g.
+ * `watch(() => ...)` or `el.addEventListener('click', () => ...)`), returns the
+ * callee name so the function scope can be tagged. Returns null otherwise.
+ */
+function getIntroducingCallName(parent: any): string | null {
+  if (!parent || parent.type !== 'CallExpression') return null;
+  const callee = parent.callee;
+  if (!callee) return null;
+  if (callee.type === 'Identifier') return callee.name;
+  if (callee.type === 'MemberExpression' && callee.property.type === 'Identifier') {
+    return callee.property.name;
+  }
+  return null;
+}
+
+/**
  * Injects the standard scope-listener visitors into a rule's visitor object so
  * rules stay free of scope boilerplate. Handles:
  *
@@ -205,8 +254,8 @@ export function attachScopeListeners(tracker: ScopeTracker, visitor: RuleVisitor
   visitor['CatchClause:exit'] = () => tracker.leaveScope();
 
   for (const type of FUNCTION_SCOPE_NODE_TYPES) {
-    visitor[type] = (node: any) => {
-      tracker.enterScope('function');
+    visitor[type] = (node: any, parent: any) => {
+      tracker.enterScope('function', getIntroducingCallName(parent));
       const params: any[] =
         node.params && node.params.type === 'FormalParameters' ? node.params.items ?? [] : node.params ?? [];
       for (const param of params) {

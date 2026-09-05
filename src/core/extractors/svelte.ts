@@ -1,60 +1,34 @@
 import type { ExtractionResult } from '../../types/rule.js';
-import { parseScriptBlocks, getScriptLang } from './scanner.js';
-
-/**
- * Maps a `lang` attribute value to a parser extension. Unknown or missing
- * languages fall back to plain JavaScript.
- */
-function inferExtension(lang: string | null): 'js' | 'ts' | 'jsx' | 'tsx' {
-  switch (lang) {
-    case 'ts':
-    case 'typescript':
-      return 'ts';
-    case 'jsx':
-      return 'jsx';
-    case 'tsx':
-      return 'tsx';
-    default:
-      return 'js';
-  }
-}
+import { parseScriptBlocks, stitchScriptBlocks } from './scanner.js';
 
 /**
  * Extracts JavaScript from a Svelte component.
  *
- * Handles plain `<script>` and `<script context="module">` blocks.
- * Computes line/column offsets so reported diagnostics map perfectly
- * back to the original `.svelte` file coordinates.
- *
- * LIMITATIONS:
- * - If a file contains BOTH `<script>` and `<script context="module">`,
- *   this currently prefers the instance `<script>` block, skipping the
- *   module-scoped block analysis.
+ * Stitches together ALL <script> bodies (both `<script>` and
+ * `<script context="module">` blocks). Every block is padded back to its exact
+ * original line/column, so reported diagnostics map perfectly to the `.svelte`
+ * file with lineOffset/columnOffset of 0. Module-context scripts are stitched
+ * first so their imports stay at the top of the synthetic module; instance
+ * scripts follow.
  */
 export function extractSvelte(code: string): ExtractionResult {
   try {
     const blocks = parseScriptBlocks(code);
 
-    if (blocks.length === 0) {
+    const stitched = stitchScriptBlocks(code, [
+      ...blocks.filter((b) => /\bcontext=["']module["']/.test(b.attrs)),
+      ...blocks.filter((b) => !/\bcontext=["']module["']/.test(b.attrs)),
+    ]);
+
+    if (!stitched) {
       return { code: '', lineOffset: 0, columnOffset: 0 };
     }
 
-    // Prefer component instance scripts over module-context scripts
-    const instanceBlock = blocks.find((b) => !/\bcontext=["']module["']/.test(b.attrs));
-    const block = instanceBlock || blocks[0];
-
-    // Compute Exact Offsets
-    const prefix = code.slice(0, block.bodyStart);
-    const lineOffset = prefix.split('\n').length - 1;
-
-    const lastNewline = prefix.lastIndexOf('\n');
-    const columnOffset = lastNewline === -1 ? block.bodyStart : block.bodyStart - lastNewline - 1;
-
     return {
-      code: code.slice(block.bodyStart, block.bodyEnd),
-      lineOffset,
-      columnOffset,
-      inferredExtension: inferExtension(getScriptLang(block.attrs)),
+      code: stitched.code,
+      lineOffset: 0,
+      columnOffset: 0,
+      inferredExtension: stitched.inferredExtension,
     };
   } catch (error) {
     // Failsafe: Never crash the build due to a malformed SFC

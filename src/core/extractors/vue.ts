@@ -1,60 +1,34 @@
 import type { ExtractionResult } from '../../types/rule.js';
-import { parseScriptBlocks, getScriptLang } from './scanner.js';
-
-/**
- * Maps a `lang` attribute value to a parser extension. Unknown or missing
- * languages fall back to plain JavaScript.
- */
-function inferExtension(lang: string | null): 'js' | 'ts' | 'jsx' | 'tsx' {
-  switch (lang) {
-    case 'ts':
-    case 'typescript':
-      return 'ts';
-    case 'jsx':
-      return 'jsx';
-    case 'tsx':
-      return 'tsx';
-    default:
-      return 'js';
-  }
-}
+import { parseScriptBlocks, stitchScriptBlocks } from './scanner.js';
 
 /**
  * Extracts JavaScript from a Vue Single File Component.
  *
- * Handles both plain `<script>` and `<script setup>` blocks accurately.
- * Computes exact line/column offsets so reported diagnostics refer to the
- * precise location in the original `.vue` file.
- *
- * LIMITATIONS:
- * - If a file contains BOTH `<script setup>` and `<script>`, this extractor
- *   currently only analyzes the `<script setup>` block, as memory leaks
- *   are overwhelmingly concentrated in instance/setup logic.
+ * Stitches together ALL <script> bodies (both plain `<script>` and
+ * `<script setup>` blocks). Every block is padded back to its exact original
+ * line/column, so reported diagnostics map perfectly to the `.vue` file with
+ * lineOffset/columnOffset of 0. Plain `<script>` blocks are stitched first so
+ * imports that live there stay at the top of the synthetic module (keeps
+ * top-level imports valid for the parser); `<script setup>` bodies follow.
  */
 export function extractVue(code: string): ExtractionResult {
   try {
     const blocks = parseScriptBlocks(code);
 
-    if (blocks.length === 0) {
+    const stitched = stitchScriptBlocks(code, [
+      ...blocks.filter((b) => !/\bsetup\b/.test(b.attrs)),
+      ...blocks.filter((b) => /\bsetup\b/.test(b.attrs)),
+    ]);
+
+    if (!stitched) {
       return { code: '', lineOffset: 0, columnOffset: 0 };
     }
 
-    // Prefer <script setup> over a standard <script> block
-    const setupBlock = blocks.find((b) => /\bsetup\b/.test(b.attrs));
-    const block = setupBlock || blocks[0];
-
-    // Compute Exact Offsets
-    const prefix = code.slice(0, block.bodyStart);
-    const lineOffset = prefix.split('\n').length - 1;
-
-    const lastNewline = prefix.lastIndexOf('\n');
-    const columnOffset = lastNewline === -1 ? block.bodyStart : block.bodyStart - lastNewline - 1;
-
     return {
-      code: code.slice(block.bodyStart, block.bodyEnd),
-      lineOffset,
-      columnOffset,
-      inferredExtension: inferExtension(getScriptLang(block.attrs)),
+      code: stitched.code,
+      lineOffset: 0,
+      columnOffset: 0,
+      inferredExtension: stitched.inferredExtension,
     };
   } catch (error) {
     // Failsafe: Never crash the build due to a malformed SFC

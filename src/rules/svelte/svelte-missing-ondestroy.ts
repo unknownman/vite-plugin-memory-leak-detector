@@ -22,6 +22,14 @@ const TEARDOWN_CALLS = new Set([
 const LEAKY_CALLS = new Set(['setInterval', 'addEventListener']);
 
 /**
+ * Reactive wrappers whose inline callbacks run as part of the component
+ * lifecycle. Allocations made inside these (e.g. `$effect(() => { setInterval(...) })`
+ * or `onMount(() => { setInterval(...) })`) must be cleared in `onDestroy`, so
+ * they are scanned. Plain DOM/event callbacks remain out of scope.
+ */
+const REACTIVE_LEAK_CONTAINERS = ['$effect', 'onMount'];
+
+/**
  * Walks a teardown callback body, collecting the names of every resource it
  * explicitly clears into `clearedInHooks`.
  */
@@ -94,9 +102,14 @@ export const svelteMissingOnDestroyRule: RuleDefinition = {
           return;
         }
 
-        // Only track allocations made directly in the component scope. Allocations
-        // inside helper functions or callbacks are not this rule's responsibility.
-        if (LEAKY_CALLS.has(name) && !tracker.isNestedInFunction()) {
+        // Track allocations made directly in the component scope, as well as
+        // allocations inside reactive wrappers ($effect/onMount). Allocations
+        // inside helper functions or DOM/event callbacks are not this rule's
+        // responsibility.
+        if (
+          LEAKY_CALLS.has(name) &&
+          (!tracker.isNestedInFunction() || tracker.isNestedInReactiveEffect(REACTIVE_LEAK_CONTAINERS))
+        ) {
           const isAllowlisted =
             callee.type === 'Identifier'
               ? context.isAllowlisted(name, 'function')

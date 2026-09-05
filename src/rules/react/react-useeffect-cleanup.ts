@@ -24,12 +24,49 @@ const CLEARANCE_FUNCTIONS = new Set(['clearInterval', 'clearTimeout', 'cancelAni
 
 const CLEARANCE_METHODS = new Set(['close', 'abort', 'disconnect', 'unsubscribe', 'off']);
 
+/**
+ * Call names that are understood by this rule — either leaky resource
+ * allocations or known clearance calls/methods. Anything else inside a cleanup
+ * function is treated as an opaque, externally-managed teardown.
+ */
+const KNOWN_CALL_NAMES = new Set([
+  ...LEAKY_CALLS,
+  ...CLEARANCE_FUNCTIONS,
+  ...CLEARANCE_METHODS,
+  'removeEventListener',
+]);
+
 interface EffectAllocation {
   name: string | null;
   type: string;
   node: any;
   isHandledExternally: boolean;
   isCollection: boolean;
+}
+
+/**
+ * Returns true when `node` (a cleanup function body) contains a CallExpression
+ * to a function that is not a recognized allocation or clearance — i.e. an
+ * opaque external teardown such as `myExternalTeardown()`. This indicates the
+ * user delegates cleanup to that external utility, so uncleared-resource
+ * warnings should be suppressed.
+ */
+function containsOpaqueCall(node: any): boolean {
+  let opaque = false;
+  walk(node, {
+    enter(child: any) {
+      if (opaque || child.type !== 'CallExpression') return;
+      const callee = child.callee;
+      if (!callee) return;
+      let name = '';
+      if (callee.type === 'Identifier') name = callee.name;
+      else if (callee.type === 'MemberExpression' && callee.property.type === 'Identifier') {
+        name = callee.property.name;
+      }
+      if (name && !KNOWN_CALL_NAMES.has(name)) opaque = true;
+    },
+  });
+  return opaque;
 }
 
 /**
@@ -69,6 +106,7 @@ function checkEffectBody(
   const allocations: EffectAllocation[] = [];
   const clearanceNames = new Set<string>();
   let hasValidCleanup = false;
+  let hasOpaqueCleanupCall = false;
 
   walk(effectBodyNode, {
     enter(child: any, parent: any) {
@@ -132,7 +170,9 @@ function checkEffectBody(
       }
 
       // A valid cleanup is a ReturnStatement that actually returns a function
-      // (arrow, function expression, or an identifier referring to one).
+      // (arrow, function expression, or an identifier referring to one). If a
+      // returned function calls an opaque external teardown utility, assume
+      // cleanup is delegated and remember that for this effect.
       if (child.type === 'ReturnStatement') {
         const arg = child.argument;
         if (
@@ -142,12 +182,18 @@ function checkEffectBody(
             arg.type === 'Identifier')
         ) {
           hasValidCleanup = true;
+          if (
+            (arg.type === 'ArrowFunctionExpression' || arg.type === 'FunctionExpression') &&
+            containsOpaqueCall(arg.body)
+          ) {
+            hasOpaqueCleanupCall = true;
+          }
         }
       }
     },
   });
 
-  return { allocations, clearanceNames, hasValidCleanup };
+  return { allocations, clearanceNames, hasValidCleanup, hasOpaqueCleanupCall };
 }
 
 export const reactUseEffectCleanupRule: RuleDefinition = {
@@ -170,46 +216,47 @@ export const reactUseEffectCleanupRule: RuleDefinition = {
             effectFn.type === 'ArrowFunctionExpression' ||
             effectFn.type === 'FunctionExpression'
           ) {
-            if (effectFn.body.type !== 'BlockStatement') return;
+            if (
+              effectFn.body.type === 'BlockStatement' ||
+              effectFn.body.type === 'FunctionBody'
+            ) {
+              const { allocations, clearanceNames, hasValidCleanup, hasOpaqueCleanupCall } =
+                checkEffectBody(effectFn.body, context.isAllowlisted);
 
-            const { allocations, clearanceNames, hasValidCleanup } = checkEffectBody(
-              effectFn.body,
-              context.isAllowlisted
-            );
+              for (const alloc of allocations) {
+                if (alloc.isHandledExternally || alloc.isCollection) continue;
 
-            for (const alloc of allocations) {
-              if (alloc.isHandledExternally || alloc.isCollection) continue;
+                if (!hasValidCleanup) {
+                  context.report({
+                    ruleId: 'react/react-useeffect-cleanup',
+                    message: `Effect hook creates subscriptions, listeners, observers, or timers but does not return a cleanup function.`,
+                    suggestion: `Return a cleanup function from your effect: \`return () => { ...teardown logic... }\`.`,
+                    line: alloc.node.loc?.start?.line ?? 1,
+                    column: alloc.node.loc?.start?.column ?? 0,
+                  });
+                  continue;
+                }
 
-              if (!hasValidCleanup) {
-                context.report({
-                  ruleId: 'react/react-useeffect-cleanup',
-                  message: `Effect hook creates subscriptions, listeners, observers, or timers but does not return a cleanup function.`,
-                  suggestion: `Return a cleanup function from your effect: \`return () => { ...teardown logic... }\`.`,
-                  line: alloc.node.loc?.start?.line ?? 1,
-                  column: alloc.node.loc?.start?.column ?? 0,
-                });
-                continue;
-              }
+                if (!alloc.name) {
+                  context.report({
+                    ruleId: 'react/react-useeffect-cleanup',
+                    message: `Unassigned '${alloc.type}' is created inside the effect and cannot be cleaned up by a returned cleanup function.`,
+                    suggestion: `Assign the ${alloc.type} result to a variable and clear it via the cleanup function.`,
+                    line: alloc.node.loc?.start?.line ?? node.loc?.start?.line ?? 1,
+                    column: alloc.node.loc?.start?.column ?? node.loc?.start?.column ?? 0,
+                  });
+                  continue;
+                }
 
-              if (!alloc.name) {
-                context.report({
-                  ruleId: 'react/react-useeffect-cleanup',
-                  message: `Unassigned '${alloc.type}' is created inside the effect and cannot be cleaned up by a returned cleanup function.`,
-                  suggestion: `Assign the ${alloc.type} result to a variable and clear it via the cleanup function.`,
-                  line: alloc.node.loc?.start?.line ?? node.loc?.start?.line ?? 1,
-                  column: alloc.node.loc?.start?.column ?? node.loc?.start?.column ?? 0,
-                });
-                continue;
-              }
-
-              if (!clearanceNames.has(alloc.name)) {
-                context.report({
-                  ruleId: 'react/react-useeffect-cleanup',
-                  message: `Resource '${alloc.name}' is allocated in the effect but the returned cleanup function does not clear it.`,
-                  suggestion: `Clear '${alloc.name}' inside the returned cleanup function (e.g., clearInterval(${alloc.name})).`,
-                  line: alloc.node.loc?.start?.line ?? 1,
-                  column: alloc.node.loc?.start?.column ?? 0,
-                });
+                if (!clearanceNames.has(alloc.name) && !hasOpaqueCleanupCall) {
+                  context.report({
+                    ruleId: 'react/react-useeffect-cleanup',
+                    message: `Resource '${alloc.name}' is allocated in the effect but the returned cleanup function does not clear it.`,
+                    suggestion: `Clear '${alloc.name}' inside the returned cleanup function (e.g., clearInterval(${alloc.name})).`,
+                    line: alloc.node.loc?.start?.line ?? 1,
+                    column: alloc.node.loc?.start?.column ?? 0,
+                  });
+                }
               }
             }
           }

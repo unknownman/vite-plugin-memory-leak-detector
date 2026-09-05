@@ -299,6 +299,51 @@ describe('no-uncleared-timers', () => {
   });
 });
 
+it('allows members expressions cleared anywhere in the file (this.timer)', () => {
+    const code = `
+      class Widget {
+        mount() {
+          this.timer = setInterval(tick, 1000);
+        }
+        unmount() {
+          clearInterval(this.timer);
+        }
+      }
+    `;
+    const diagnostics = runRule(noUnclearedTimersRule, code);
+    expect(diagnostics).toHaveLength(0);
+  });
+
+  it('allows computed member expressions cleared anywhere (ref["current"])', () => {
+    const code = `
+      function start() {
+        ref['current'] = setInterval(tick, 1000);
+      }
+      function stop() {
+        clearInterval(ref['current']);
+      }
+    `;
+    const diagnostics = runRule(noUnclearedTimersRule, code);
+    expect(diagnostics).toHaveLength(0);
+  });
+
+  it('flags member expressions that are never cleared', () => {
+    const code = `
+      class Widget {
+        mount() {
+          this.timer = setInterval(tick, 1000);
+        }
+      }
+    `;
+    const diagnostics = runRule(noUnclearedTimersRule, code);
+    expect(diagnostics).toHaveLength(1);
+  });
+
+  it('allows timers passed to React state setters (setTimerId)', () => {
+    const diagnostics = runRule(noUnclearedTimersRule, `setTimerId(setInterval(() => {}, 1000));`);
+    expect(diagnostics).toHaveLength(0);
+  });
+
 describe('no-uncleared-animation-frames', () => {
   it('detects unassigned requestAnimationFrame', () => {
     const diagnostics = runRule(noUnclearedAnimationFramesRule, `requestAnimationFrame(() => {});`);
