@@ -20,10 +20,14 @@ export function getExtension(file: string): ExtractableExtension | null {
 /**
  * Dispatches to the appropriate extractor based on the file extension.
  * Returns `null` if the file type is not supported.
+ *
+ * Vue/Svelte extraction uses the official framework compilers via dynamic
+ * imports, so this is async; when the compiler is unavailable an empty
+ * extraction is returned rather than throwing.
  */
-export function extractSource(file: string, code: string): ExtractionResult | null {
+export async function extractSource(file: string, code: string): Promise<ExtractionResult | null> {
   const ext = getExtension(file);
-  
+
   switch (ext) {
     case 'vue':
       return extractVue(code);

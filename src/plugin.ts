@@ -52,7 +52,7 @@ export function memoryLeakDetectorPlugin(options: PluginOptions = {}): Plugin {
     },
 
     // 3. Process each file
-    transform(code, id) {
+    async transform(code, id) {
       // Virtual modules (e.g. `App.vue?vue&type=script`, `App.ts?raw`) are
       // slices of their primary file and are already covered by this primary
       // transform. The cache is keyed by the bare physical path so each file
@@ -61,7 +61,7 @@ export function memoryLeakDetectorPlugin(options: PluginOptions = {}): Plugin {
       if (!filter(normalizedId)) return null;
       if (normalizedId !== id) return null;
 
-      const extraction = extractSource(normalizedId, code);
+      const extraction = await extractSource(normalizedId, code);
       if (!extraction) return null;
 
       const diagnostics = engine.analyze(normalizedId, code, extraction);

@@ -9,9 +9,32 @@ export interface ScopedAllocation {
 interface RecordedClearance {
   name: string;
   scopeId: number;
+  /** True when the clearance is guarded by a conditional (`if`, `switch`, `? :`, `&&`, `||`). */
+  conditional: boolean;
 }
 
 export type ScopeKind = 'function' | 'block';
+
+/**
+ * Function/method scope tags that are accepted as "teardown" contexts. A
+ * member-expression resource (e.g. `this.timer`) may only be considered
+ * cleared when the clearance occurs in the same scope subtree as the
+ * allocation, or inside one of these lifecycle/teardown hooks.
+ */
+export const TEARDOWN_SCOPE_TAGS = new Set([
+  'unmount',
+  'onUnmount',
+  'onUnmounted',
+  'onBeforeUnmount',
+  'componentWillUnmount',
+  'onDestroy',
+  'onCleanup',
+  'close',
+  'disconnect',
+  'stop',
+  'cleanup',
+  'teardown',
+]);
 
 /**
  * Lexical-environment-aware tracker for allocation/clearance pairs.
@@ -35,6 +58,7 @@ export class ScopeTracker {
   private declaredVariables = new Map<number, Set<string>>();
   private scopeKinds = new Map<number, ScopeKind>();
   private scopeTags = new Map<number, string | null>();
+  private conditionalDepth = 0;
 
   /** Call at Program entry to create the root (module) scope. */
   enterRootScope() {
@@ -50,9 +74,10 @@ export class ScopeTracker {
    * `'block'` (default) for block statements so `let`/`const` shadowing is
    * modeled correctly.
    *
-   * `tag` optionally records the CallExpression callee that introduced this
-   * scope (e.g. `watch`, `onMounted`, `createEffect`), so rules can tell apart
-   * reactive-effect wrappers from plain DOM/event callbacks.
+   * `tag` optionally records the CallExpression callee, method name, or
+   * function name that introduced this scope (e.g. `watch`, `onMounted`,
+   * `stop`, `unmount`), so rules can tell apart reactive-effect wrappers from
+   * plain DOM/event callbacks and recognize teardown contexts.
    */
   enterScope(kind: ScopeKind = 'block', tag: string | null = null) {
     const id = this.nextScopeId++;
@@ -69,6 +94,18 @@ export class ScopeTracker {
 
   currentScopeId(): number {
     return this.scopeStack[this.scopeStack.length - 1] ?? 0;
+  }
+
+  enterConditional() {
+    this.conditionalDepth++;
+  }
+
+  exitConditional() {
+    if (this.conditionalDepth > 0) this.conditionalDepth--;
+  }
+
+  isInConditionalBranch(): boolean {
+    return this.conditionalDepth > 0;
   }
 
   /**
@@ -117,7 +154,11 @@ export class ScopeTracker {
   }
 
   addClearance(name: string) {
-    this.clearances.push({ name, scopeId: this.currentScopeId() });
+    this.clearances.push({
+      name,
+      scopeId: this.currentScopeId(),
+      conditional: this.conditionalDepth > 0,
+    });
   }
 
   /**
@@ -143,29 +184,97 @@ export class ScopeTracker {
     return this.scopeStack[this.scopeStack.length - 1] ?? 0;
   }
 
+  private isTeardownScope(scopeId: number): boolean {
+    let current: number | undefined = scopeId;
+    while (current !== undefined) {
+      const tag = this.scopeTags.get(current);
+      if (tag && TEARDOWN_SCOPE_TAGS.has(tag)) return true;
+      current = this.parentMap.get(current);
+    }
+    return false;
+  }
+
   /**
-   * Returns true when any clearance for `name` resolves to the exact same
-   * declaration scope as the allocation. For names that cannot be resolved to
-   * a lexical declaration (e.g. member-property targets like `this.timer`),
-   * falls back to requiring the clearance to occur within the same scope
-   * subtree as the allocation.
+   * Returns every clearance that is scope-applicable to the given allocation.
    *
-   * Member expressions (`this.timer`, `ref.current`) are attached to an object
-   * or context that escapes strict local scope, so an exact string match
-   * anywhere in the file counts as cleared regardless of scope parentage.
+   * For lexical names, the clearance must resolve to the exact same
+   * declaration scope as the allocation (with a same-subtree fallback when the
+   * name has no tracked declaration). For member expressions (`this.timer`,
+   * `ref.current`) the resource lives on a shared object/context, so a
+   * clearance is applicable only when it occurs within the allocation's own
+   * scope subtree or inside a recognized teardown scope (e.g. `unmount`,
+   * `onUnmounted`, `close`, `stop`).
    */
-  isCleared(name: string, allocScopeId: number): boolean {
-    // Member expressions like `this.timer` or `ref.current` escape the strict
-    // lexical environment (they live on an object shared across scopes), so a
-    // same-named clearance anywhere in the file is sufficient.
-    if (name.includes('.') || name.includes('[')) {
-      return this.clearances.some((c) => c.name === name);
+  private matchingClearances(name: string, allocScopeId: number): RecordedClearance[] {
+    const isMemberExpression = name.includes('.') || name.includes('[');
+
+    if (isMemberExpression) {
+      return this.clearances.filter(
+        (c) =>
+          c.name === name &&
+          (this.isDescendantOrSame(c.scopeId, allocScopeId) || this.isTeardownScope(c.scopeId))
+      );
     }
 
     const allocDeclScope = this.resolveDeclarationScope(name, allocScopeId);
+    const matches: RecordedClearance[] = [];
 
     for (const c of this.clearances) {
       if (c.name !== name) continue;
+
+      const clearanceDeclScope = this.resolveDeclarationScope(name, c.scopeId);
+
+      if (allocDeclScope !== null && clearanceDeclScope !== null) {
+        if (allocDeclScope === clearanceDeclScope) matches.push(c);
+        continue;
+      }
+
+      if (allocDeclScope === null && clearanceDeclScope === null) {
+        if (
+          this.isDescendantOrSame(c.scopeId, allocScopeId) ||
+          this.isDescendantOrSame(allocScopeId, c.scopeId)
+        ) {
+          matches.push(c);
+        }
+      }
+    }
+
+    return matches;
+  }
+
+  /**
+   * Returns true when `name` (allocated at `allocScopeId`) is cleared by at
+   * least one scope-applicable, unconditional clearance.
+   */
+  isCleared(name: string, allocScopeId: number): boolean {
+    return this.matchingClearances(name, allocScopeId).some((c) => !c.conditional);
+  }
+
+  /**
+   * Returns true when `name` is only ever cleared by conditional clearances
+   * (inside `if`, `switch`, `? :` or `&&`/`||`). The resource will still leak
+   * any time the guard does not take the clearance branch.
+   */
+  isOnlyConditionallyCleared(name: string, allocScopeId: number): boolean {
+    const matches = this.matchingClearances(name, allocScopeId);
+    return matches.length > 0 && matches.every((c) => c.conditional);
+  }
+
+  /**
+   * Returns true when `name` is cleared by an unconditional clearance that
+   * occurs inside the scope subtree rooted at `containerScopeId` (e.g. a
+   * `useEffect` body). Clearances and the allocation must still resolve to the
+   * same lexical declaration.
+   */
+  isClearedWithin(name: string, allocScopeId: number, containerScopeId: number): boolean {
+    const isMemberExpression = name.includes('.') || name.includes('[');
+    const allocDeclScope = this.resolveDeclarationScope(name, allocScopeId);
+
+    for (const c of this.clearances) {
+      if (c.name !== name || c.conditional) continue;
+      if (!this.isDescendantOrSame(c.scopeId, containerScopeId)) continue;
+
+      if (isMemberExpression) return true;
 
       const clearanceDeclScope = this.resolveDeclarationScope(name, c.scopeId);
 
@@ -184,6 +293,10 @@ export class ScopeTracker {
       }
     }
     return false;
+  }
+
+  getScopeTag(scopeId: number): string | null {
+    return this.scopeTags.get(scopeId) ?? null;
   }
 
   /**
@@ -209,19 +322,56 @@ const BLOCK_SCOPE_NODE_TYPES = ['BlockStatement', 'ForStatement', 'ForInStatemen
 const FUNCTION_SCOPE_NODE_TYPES = ['FunctionDeclaration', 'FunctionExpression', 'ArrowFunctionExpression'];
 
 /**
- * When a function is passed as an argument to a CallExpression (e.g.
- * `watch(() => ...)` or `el.addEventListener('click', () => ...)`), returns the
- * callee name so the function scope can be tagged. Returns null otherwise.
+ * Conditional constructs that should mark any clearance inside them as
+ * "conditional" (a guard that may not execute).
  */
-function getIntroducingCallName(parent: any): string | null {
-  if (!parent || parent.type !== 'CallExpression') return null;
-  const callee = parent.callee;
-  if (!callee) return null;
-  if (callee.type === 'Identifier') return callee.name;
-  if (callee.type === 'MemberExpression' && callee.property.type === 'Identifier') {
-    return callee.property.name;
+const CONDITIONAL_NODE_TYPES = ['IfStatement', 'SwitchCase', 'ConditionalExpression'];
+
+/**
+ * Derives a semantic tag for a function scope from its surrounding context:
+ *  - the name of the CallExpression it was passed to (`watch`, `onMounted`,
+ *    `addEventListener`, ...),
+ *  - the declared name of a function declaration (`stop`, `unmount`, ...),
+ *  - the method/property key for class or object methods,
+ *  - the binder name when assigned to a variable.
+ * Returns null when the function has no meaningful introducer.
+ */
+function getFunctionScopeTag(node: any, parent: any): string | null {
+  if (parent && parent.type === 'CallExpression') {
+    const callee = parent.callee;
+    if (!callee) return null;
+    if (callee.type === 'Identifier') return callee.name;
+    if (callee.type === 'MemberExpression' && callee.property && callee.property.type === 'Identifier') {
+      return callee.property.name;
+    }
+    return null;
   }
+
+  if (node.type === 'FunctionDeclaration' && node.id && node.id.name) {
+    return node.id.name;
+  }
+
+  if (parent && parent.type === 'MethodDefinition' && parent.key) {
+    return parent.key.name || (parent.key.type === 'Literal' ? String(parent.key.value) : null);
+  }
+
+  if (parent && (parent.type === 'Property' || parent.type === 'ObjectProperty')) {
+    if (parent.key && parent.key.type === 'Identifier') return parent.key.name;
+    if (parent.key && parent.key.type === 'Literal') return String(parent.key.value);
+  }
+
+  if (parent && parent.type === 'VariableDeclarator' && parent.id && parent.id.type === 'Identifier') {
+    return parent.id.name;
+  }
+
   return null;
+}
+
+export interface ScopeListenersHooks {
+  /** Invoked just after a function scope has been entered and tagged. */
+  onFunctionScopeEnter?(node: any, parent: any, tag: string | null, scopeId: number): void;
+  /** Invoked just before a function scope is left. */
+  onFunctionScopeExit?(node: any, parent: any): void;
 }
 
 /**
@@ -230,20 +380,35 @@ function getIntroducingCallName(parent: any): string | null {
  *
  *  - Program root scope.
  *  - Block boundaries: BlockStatement, for/for-in/for-of loops, SwitchStatement.
- *  - Function boundaries (with parameter declarations).
+ *  - Function boundaries (with parameter declarations), tagged with their
+ *    introducing call/method/function name via `hooks` when provided.
  *  - CatchClause (with its bound parameter).
  *  - VariableDeclarator declarations, including destructured patterns.
+ *  - Conditional constructs (`if`, `switch` case, `? :`, `&&`, `||`) which
+ *    mark guard-gated clearances as conditional.
  *
  * Note: it sets `visitor[type]` unconditionally for these node types, so rules
  * must not define their own handlers for them.
  */
-export function attachScopeListeners(tracker: ScopeTracker, visitor: RuleVisitor): void {
+export function attachScopeListeners(tracker: ScopeTracker, visitor: RuleVisitor, hooks?: ScopeListenersHooks): void {
   visitor.Program = () => tracker.enterRootScope();
 
   for (const type of BLOCK_SCOPE_NODE_TYPES) {
     visitor[type] = () => tracker.enterScope('block');
     visitor[`${type}:exit`] = () => tracker.leaveScope();
   }
+
+  for (const type of CONDITIONAL_NODE_TYPES) {
+    visitor[type] = () => tracker.enterConditional();
+    visitor[`${type}:exit`] = () => tracker.exitConditional();
+  }
+
+  visitor.LogicalExpression = (node: any) => {
+    if (node.operator === '&&' || node.operator === '||') tracker.enterConditional();
+  };
+  visitor['LogicalExpression:exit'] = (node: any) => {
+    if (node.operator === '&&' || node.operator === '||') tracker.exitConditional();
+  };
 
   visitor.CatchClause = (node: any) => {
     tracker.enterScope('block');
@@ -255,7 +420,8 @@ export function attachScopeListeners(tracker: ScopeTracker, visitor: RuleVisitor
 
   for (const type of FUNCTION_SCOPE_NODE_TYPES) {
     visitor[type] = (node: any, parent: any) => {
-      tracker.enterScope('function', getIntroducingCallName(parent));
+      const tag = getFunctionScopeTag(node, parent);
+      const scopeId = tracker.enterScope('function', tag);
       const params: any[] =
         node.params && node.params.type === 'FormalParameters' ? node.params.items ?? [] : node.params ?? [];
       for (const param of params) {
@@ -263,8 +429,12 @@ export function attachScopeListeners(tracker: ScopeTracker, visitor: RuleVisitor
           tracker.declareVariable(name, 'let');
         }
       }
+      hooks?.onFunctionScopeEnter?.(node, parent, tag, scopeId);
     };
-    visitor[`${type}:exit`] = () => tracker.leaveScope();
+    visitor[`${type}:exit`] = (node: any, parent: any) => {
+      hooks?.onFunctionScopeExit?.(node, parent);
+      tracker.leaveScope();
+    };
   }
 
   visitor.VariableDeclarator = (node: any, parent: any) => {

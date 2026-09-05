@@ -1,28 +1,72 @@
 import type { ExtractionResult } from '../../types/rule.js';
-import { parseScriptBlocks, stitchScriptBlocks } from './scanner.js';
+import { buildLineStarts, offsetToPosition } from '../parser.js';
+import { stitchBlocks, langToExtension, type StitchedBlock } from './stitch.js';
+
+interface VueSfcBlock {
+  content?: string;
+  lang?: string;
+  loc?: { start?: { offset?: number } };
+}
+
+interface VueCompilerSfc {
+  parse(source: string, options?: unknown): {
+    descriptor: { script?: VueSfcBlock | null; scriptSetup?: VueSfcBlock | null };
+    errors?: unknown[];
+  };
+}
+
+let vueCompilerPromise: Promise<VueCompilerSfc> | null = null;
 
 /**
- * Extracts JavaScript from a Vue Single File Component.
+ * Lazily loads `vue/compiler-sfc` (an optional peer dependency). The promise is
+ * cached so the dynamic import only happens once per process.
+ */
+function loadVueCompiler(): Promise<VueCompilerSfc> {
+  if (!vueCompilerPromise) {
+    vueCompilerPromise = import('vue/compiler-sfc') as Promise<VueCompilerSfc>;
+  }
+  return vueCompilerPromise;
+}
+
+const EMPTY: ExtractionResult = { code: '', lineOffset: 0, columnOffset: 0 };
+
+/**
+ * Extracts JavaScript from a Vue Single File Component using the official
+ * `vue/compiler-sfc` parser.
  *
  * Stitches together ALL <script> bodies (both plain `<script>` and
  * `<script setup>` blocks). Every block is padded back to its exact original
- * line/column, so reported diagnostics map perfectly to the `.vue` file with
- * lineOffset/columnOffset of 0. Plain `<script>` blocks are stitched first so
- * imports that live there stay at the top of the synthetic module (keeps
- * top-level imports valid for the parser); `<script setup>` bodies follow.
+ * line/column (derived from the compiler-provided AST locations), so reported
+ * diagnostics map perfectly to the `.vue` file with lineOffset/columnOffset of
+ * 0. Plain `<script>` blocks are stitched first so imports that live there stay
+ * at the top of the synthetic module.
+ *
+ * If `vue` is not installed (e.g. the consumer only deals with vanilla JS),
+ * the dynamic import fails gracefully and an empty extraction is returned —
+ * without crashing the Vite build.
  */
-export function extractVue(code: string): ExtractionResult {
+export async function extractVue(code: string): Promise<ExtractionResult> {
   try {
-    const blocks = parseScriptBlocks(code);
+    const { parse } = await loadVueCompiler();
+    const { descriptor } = parse(code);
+    const lineStarts = buildLineStarts(code);
 
-    const stitched = stitchScriptBlocks(code, [
-      ...blocks.filter((b) => !/\bsetup\b/.test(b.attrs)),
-      ...blocks.filter((b) => /\bsetup\b/.test(b.attrs)),
-    ]);
-
-    if (!stitched) {
-      return { code: '', lineOffset: 0, columnOffset: 0 };
+    const blocks: StitchedBlock[] = [];
+    for (const block of [descriptor.script, descriptor.scriptSetup]) {
+      if (!block || !block.content || block.content.trim() === '') continue;
+      const offset = block.loc?.start?.offset ?? -1;
+      const pos =
+        offset >= 0 ? offsetToPosition(offset, lineStarts) : { line: 1, column: 0 };
+      blocks.push({
+        content: block.content,
+        line: pos.line,
+        column: pos.column,
+        extension: langToExtension(block.lang),
+      });
     }
+
+    const stitched = stitchBlocks(blocks);
+    if (!stitched) return EMPTY;
 
     return {
       code: stitched.code,
@@ -31,7 +75,8 @@ export function extractVue(code: string): ExtractionResult {
       inferredExtension: stitched.inferredExtension,
     };
   } catch (error) {
-    // Failsafe: Never crash the build due to a malformed SFC
-    return { code: '', lineOffset: 0, columnOffset: 0 };
+    // vue/compiler-sfc is unavailable (not installed) or the SFC is malformed.
+    // Failsafe: never crash the build.
+    return EMPTY;
   }
 }

@@ -344,6 +344,84 @@ it('allows members expressions cleared anywhere in the file (this.timer)', () =>
     expect(diagnostics).toHaveLength(0);
   });
 
+  it('flags member expression cleared in an unrelated scope (this.timer)', () => {
+    const code = `
+      class Widget {
+        start() {
+          this.timer = setInterval(tick, 1000);
+        }
+        unrelated() {
+          clearInterval(this.timer);
+        }
+      }
+    `;
+    const diagnostics = runRule(noUnclearedTimersRule, code);
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0].message).toContain("Timer 'this.timer'");
+  });
+
+  it('allows member expression cleared in a teardown method (stop)', () => {
+    const code = `
+      class Widget {
+        start() {
+          this.timer = setInterval(tick, 1000);
+        }
+        stop() {
+          clearInterval(this.timer);
+        }
+      }
+    `;
+    const diagnostics = runRule(noUnclearedTimersRule, code);
+    expect(diagnostics).toHaveLength(0);
+  });
+
+  it('allows member expression cleared in a teardown function (unmount)', () => {
+    const code = `
+      function mount() {
+        widget.timer = setInterval(tick, 1000);
+      }
+      function unmount() {
+        clearInterval(widget.timer);
+      }
+    `;
+    const diagnostics = runRule(noUnclearedTimersRule, code);
+    expect(diagnostics).toHaveLength(0);
+  });
+
+  it('flags timers only cleared inside an if guard', () => {
+    const code = `
+      const timerId = setInterval(tick, 1000);
+      if (enabled) {
+        clearInterval(timerId);
+      }
+    `;
+    const diagnostics = runRule(noUnclearedTimersRule, code);
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0].message).toContain('only cleared conditionally');
+  });
+
+  it('flags timers only cleared via short-circuit (&&)', () => {
+    const code = `
+      const timerId = setInterval(tick, 1000);
+      cleanup && clearInterval(timerId);
+    `;
+    const diagnostics = runRule(noUnclearedTimersRule, code);
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0].message).toContain('only cleared conditionally');
+  });
+
+  it('allows timers cleared in one branch when also cleared unconditionally', () => {
+    const code = `
+      const timerId = setInterval(tick, 1000);
+      if (enabled) {
+        clearInterval(timerId);
+      }
+      clearInterval(timerId);
+    `;
+    const diagnostics = runRule(noUnclearedTimersRule, code);
+    expect(diagnostics).toHaveLength(0);
+  });
+
 describe('no-uncleared-animation-frames', () => {
   it('detects unassigned requestAnimationFrame', () => {
     const diagnostics = runRule(noUnclearedAnimationFramesRule, `requestAnimationFrame(() => {});`);

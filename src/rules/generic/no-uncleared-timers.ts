@@ -38,6 +38,16 @@ export const noUnclearedTimersRule: RuleDefinition = {
           }
 
           if (!tracker.isCleared(alloc.name, alloc.scopeId)) {
+            if (tracker.isOnlyConditionallyCleared(alloc.name, alloc.scopeId)) {
+              context.report({
+                ruleId: 'generic/no-uncleared-timers',
+                message: `Timer '${alloc.name}' (${alloc.type}) is only cleared conditionally (e.g. inside an \`if\`, \`switch\`, or \`&&\`), which may lead to leaks.`,
+                suggestion: `Call clearInterval(${alloc.name}) unconditionally when the component or process finishes.`,
+                line: alloc.node.loc?.start?.line ?? 1,
+                column: alloc.node.loc?.start?.column ?? 0,
+              });
+              continue;
+            }
             context.report({
               ruleId: 'generic/no-uncleared-timers',
               message: `Timer '${alloc.name}' (${alloc.type}) is allocated but never cleared.`,
