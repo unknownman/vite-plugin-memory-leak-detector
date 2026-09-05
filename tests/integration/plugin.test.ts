@@ -3,7 +3,7 @@ import { memoryLeakDetectorPlugin } from '../../src/plugin.js';
 import * as reporterModule from '../../src/reporter/index.js';
 
 describe('memoryLeakDetectorPlugin UX and reporting', () => {
-  it('does not duplicate stylish reporting in buildEnd when rollupReporter was emitted during build', async () => {
+  it('does not emit rollup warnings during transform; stylish is dispatched in buildEnd', async () => {
     const plugin = memoryLeakDetectorPlugin({
       reports: [{ format: 'stylish' }],
     }) as any;
@@ -25,19 +25,20 @@ describe('memoryLeakDetectorPlugin UX and reporting', () => {
       setInterval(() => {}, 1000);
     `;
 
-    // Transform leaky code
+    // Transform leaky code. Reporting must NOT happen here: real-time warnings
+    // are printed from the dev-server side (handleHotUpdate + summaries), so
+    // Vite's transform cache cannot swallow them.
     await plugin.transform.call(rollupContext, code, '/test/src/App.ts');
-
-    // Vite should have received the warning natively during transform
-    expect(warnSpy).toHaveBeenCalled();
+    expect(warnSpy).not.toHaveBeenCalled();
+    expect(rollupContext.error).not.toHaveBeenCalled();
 
     // Call buildEnd
     await plugin.buildEnd.call(rollupContext);
 
-    // dispatchReports should NOT have received stylish report because rollupReporter already emitted it
+    // The stylish report is dispatched from buildEnd in this architecture.
     expect(dispatchSpy).toHaveBeenCalled();
     const passedReports = dispatchSpy.mock.calls[0][1];
-    expect(passedReports.some((r: any) => r.format === 'stylish')).toBe(false);
+    expect(passedReports.some((r: any) => r.format === 'stylish')).toBe(true);
 
     // Numeric summary should still be printed
     const loggedMessages = consoleLogSpy.mock.calls.map((c) => c.join(' ')).join('\n');
@@ -85,10 +86,11 @@ describe('memoryLeakDetectorPlugin UX and reporting', () => {
     const code = `setInterval(() => {}, 1000);`;
     await plugin.transform.call(rollupContext, code, '/test/src/App.ts');
 
-    // Errors must be downgraded to warnings in transform; context.error is
-    // reserved for buildEnd threshold enforcement.
-    expect(rollupContext.warn).toHaveBeenCalled();
+    // The transform hook must never call context.error() — aborting the module
+    // chain would fatal the build. Warnings are also no longer emitted here;
+    // they surface via the dev-server reporting path instead.
     expect(rollupContext.error).not.toHaveBeenCalled();
+    expect(rollupContext.warn).not.toHaveBeenCalled();
 
     consoleLogSpy.mockRestore();
   });
@@ -111,11 +113,9 @@ describe('memoryLeakDetectorPlugin UX and reporting', () => {
 
     // Virtual module slice (same physical file): must be ignored entirely.
     await plugin.transform.call(rollupContext, code, '/test/src/App.ts?vue&type=script&lang.ts');
-    expect(rollupContext.warn).not.toHaveBeenCalled();
 
-    // Real module transform: reported once.
+    // Real module transform: analyzed normally.
     await plugin.transform.call(rollupContext, code, '/test/src/App.ts');
-    expect(rollupContext.warn).toHaveBeenCalledTimes(1);
 
     await plugin.buildEnd.call(rollupContext);
 

@@ -55,7 +55,7 @@
   "dependencies": {
     "@rollup/pluginutils": "^5.1.0",
     "estree-walker": "^3.0.3",
-    "oxc-parser": "^0.30.0",
+    "oxc-parser": "^0.148.0",
     "picocolors": "^1.0.0",
     "picomatch": "^4.0.7"
   },

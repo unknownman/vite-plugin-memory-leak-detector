@@ -339,6 +339,44 @@ it('allows members expressions cleared anywhere in the file (this.timer)', () =>
     expect(diagnostics).toHaveLength(1);
   });
 
+  it('allows a class property timer cleared inside dispose()', () => {
+    const code = `
+      class TimerService {
+        timer = setInterval(tick, 1000);
+        dispose() {
+          clearInterval(this.timer);
+        }
+      }
+    `;
+    const diagnostics = runRule(noUnclearedTimersRule, code);
+    expect(diagnostics).toHaveLength(0);
+  });
+
+  it('flags a class property timer with no dispose cleanup', () => {
+    const code = `
+      class TimerService {
+        timer = setInterval(tick, 1000);
+      }
+    `;
+    const diagnostics = runRule(noUnclearedTimersRule, code);
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0].message).toContain("Timer 'this.timer'");
+  });
+
+  it('flags a class property timer when dispose clears a different resource', () => {
+    const code = `
+      class TimerService {
+        timer = setInterval(tick, 1000);
+        dispose() {
+          clearInterval(other);
+        }
+      }
+    `;
+    const diagnostics = runRule(noUnclearedTimersRule, code);
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0].message).toContain("Timer 'this.timer'");
+  });
+
   it('allows timers passed to React state setters (setTimerId)', () => {
     const diagnostics = runRule(noUnclearedTimersRule, `setTimerId(setInterval(() => {}, 1000));`);
     expect(diagnostics).toHaveLength(0);

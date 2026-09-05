@@ -443,4 +443,12 @@ export function attachScopeListeners(tracker: ScopeTracker, visitor: RuleVisitor
       tracker.declareVariable(name, kind);
     }
   };
+
+  // Class fields (e.g. `timer = setInterval(...)` in a class body) live on the
+  // instance as `this.timer`, so they are declared as member-expression names.
+  visitor.PropertyDefinition = (node: any) => {
+    if (node.key && node.key.type === 'Identifier') {
+      tracker.declareVariable(`this.${node.key.name}`, 'let');
+    }
+  };
 }

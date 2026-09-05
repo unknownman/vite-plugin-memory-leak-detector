@@ -172,6 +172,17 @@ export function getAllocationTarget(
       };
     }
 
+    // class TimerService { timer = setInterval(...) } — the allocation lives on
+    // the instance, so it is tracked as the `this.timer` member expression and
+    // must be cleared via `clearInterval(this.timer)` (e.g. in a dispose()).
+    if (curr.type === 'PropertyDefinition') {
+      return {
+        name: curr.key && curr.key.type === 'Identifier' ? `this.${curr.key.name}` : null,
+        isHandledExternally: false,
+        isCollection: false,
+      };
+    }
+
     // [setInterval(...)] — the allocation is captured by an array literal,
     // which the consumer owns; treat it like a collection.
     if (curr.type === 'ArrayExpression') {

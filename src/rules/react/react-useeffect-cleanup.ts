@@ -67,6 +67,15 @@ function getClearedName(node: any): string | null {
   return null;
 }
 
+/**
+ * Matches React effect hooks: `useEffect`, `useLayoutEffect`, and any custom
+ * wrapper ending in `Effect` (e.g. `useIsomorphicLayoutEffect`,
+ * `useUpdateEffect`, `useMyCustomEffect`).
+ */
+function isEffectHook(name: string): boolean {
+  return /^use.*Effect$/i.test(name);
+}
+
 interface EffectAllocation {
   name: string | null;
   type: string;
@@ -88,7 +97,7 @@ interface EffectContext {
 
 export const reactUseEffectCleanupRule: RuleDefinition = {
   id: 'react/react-useeffect-cleanup',
-  description: 'Checks if useEffect creates subscriptions, workers, or controllers but lacks a cleanup function.',
+  description: 'Checks if React effect hooks (useEffect or any hook ending in Effect) create subscriptions, timers, or controllers but lack a cleanup function.',
   category: 'react',
   defaultSeverity: 'error',
 
@@ -196,10 +205,7 @@ export const reactUseEffectCleanupRule: RuleDefinition = {
       const name = getCalleeName(callee);
 
       // Register the effect callback so its function scope opens an effect context.
-      if (
-        callee.type === 'Identifier' &&
-        (callee.name === 'useEffect' || callee.name === 'useLayoutEffect')
-      ) {
+      if (callee.type === 'Identifier' && isEffectHook(callee.name)) {
         const effectFn = node.arguments[0];
         if (effectFn && (effectFn.type === 'ArrowFunctionExpression' || effectFn.type === 'FunctionExpression')) {
           const body = effectFn.body;

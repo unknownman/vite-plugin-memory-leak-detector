@@ -24,10 +24,15 @@ const LEAKY_CALLS = new Set(['setInterval', 'addEventListener']);
 /**
  * Reactive wrappers whose inline callbacks run as part of the component
  * lifecycle. Allocations made inside these (e.g. `$effect(() => { setInterval(...) })`
- * or `onMount(() => { setInterval(...) })`) must be cleared in `onDestroy`, so
- * they are scanned. Plain DOM/event callbacks remain out of scope.
+ * or `onMount(() => { setInterval(...) })`) must be cleared in `onDestroy` —
+ * or, for Svelte 5 runes, in a cleanup function returned from the
+ * `$effect`/`onMount` callback itself — so they are scanned. Plain DOM/event
+ * callbacks remain out of scope.
  */
 const REACTIVE_LEAK_CONTAINERS = ['$effect', 'onMount'];
+
+/** Callbacks whose returned function acts as the effect's teardown. */
+const CLEANUP_RETURN_CONTAINERS = new Set(['$effect', 'onMount']);
 
 /**
  * Walks a teardown callback body, collecting the names of every resource it
@@ -65,82 +70,153 @@ export const svelteMissingOnDestroyRule: RuleDefinition = {
 
   create(context: RuleContext) {
     const tracker = new ScopeTracker();
-    const allocations: { name: string | null; node: any }[] = [];
+    const allocations: { name: string | null; node: any; scopeId: number }[] = [];
     const clearedInHooks = new Set<string>();
 
-    const visitor: RuleVisitor = {
-      CallExpression(node: any, parent: any, ancestors?: any[]) {
-        const callee = node.callee;
-        let name = '';
+    // Svelte 5 runes: `$effect(() => { ... return () => cleanup() })` (and the
+    // Svelte 4 `onMount` equivalent) teardown a resource by returning a cleanup
+    // function from the callback itself.
+    let pendingCleanupReturnFn: any = null;
+    const cleanupReturnNodeStack: any[] = [];
+    const cleanupReturnScopes: { node: any; scopeId: number }[] = [];
 
-        if (callee.type === 'Identifier') {
-          name = callee.name;
-        } else if (callee.type === 'MemberExpression' && callee.property.type === 'Identifier') {
-          name = callee.property.name;
+    function findEnclosingCleanupReturnScope(scopeId: number) {
+      let best: { node: any; scopeId: number } | null = null;
+      for (const entry of cleanupReturnScopes) {
+        if (tracker.isDescendantOrSame(scopeId, entry.scopeId)) {
+          if (!best || entry.scopeId > best.scopeId) best = entry;
         }
+      }
+      return best;
+    }
 
-        if (!name) return;
+    const visitor: RuleVisitor = {};
 
-        // Lifecycle teardown hook: collect the variable names it explicitly clears.
-        if (name === 'onDestroy') {
-          const callback = node.arguments[0];
+    attachScopeListeners(tracker, visitor, {
+      onFunctionScopeEnter(node: any, parent: any, _tag: string | null, scopeId: number) {
+        // The effect/onMount callback itself: open a container whose returned
+        // cleanup function is valid teardown for allocations inside it.
+        if (pendingCleanupReturnFn && node === pendingCleanupReturnFn) {
+          pendingCleanupReturnFn = null;
+          cleanupReturnScopes.push({ node, scopeId });
+          cleanupReturnNodeStack.push(node);
+        }
+      },
 
-          if (!callback) return;
-          if (callback.type === 'ArrowFunctionExpression' || callback.type === 'FunctionExpression') {
-            collectClearances(callback.body, clearedInHooks);
-            return;
-          }
+      onFunctionScopeExit(node: any) {
+        if (cleanupReturnNodeStack.length && node === cleanupReturnNodeStack[cleanupReturnNodeStack.length - 1]) {
+          cleanupReturnNodeStack.pop();
+        }
+      },
+    });
 
-          // `onDestroy(cleanup)` — resolve the referenced local function. If it
-          // can't be found (e.g. imported from another file), assume the external
-          // teardown handles it and suppress all warnings for this file.
-          if (callback.type === 'Identifier') {
-            const body = findFunctionBodyInAncestors(callback.name, ancestors);
-            if (body) collectClearances(body, clearedInHooks);
-            else clearedInHooks.add('*');
-          }
+    visitor.CallExpression = (node: any, parent: any, ancestors?: any[]) => {
+      const callee = node.callee;
+      let name = '';
+
+      if (callee.type === 'Identifier') {
+        name = callee.name;
+      } else if (callee.type === 'MemberExpression' && callee.property.type === 'Identifier') {
+        name = callee.property.name;
+      }
+
+      if (!name) return;
+
+      // Lifecycle teardown hook: collect the variable names it explicitly clears.
+      if (name === 'onDestroy') {
+        const callback = node.arguments[0];
+
+        if (!callback) return;
+        if (callback.type === 'ArrowFunctionExpression' || callback.type === 'FunctionExpression') {
+          collectClearances(callback.body, clearedInHooks);
           return;
         }
 
-        // Track allocations made directly in the component scope, as well as
-        // allocations inside reactive wrappers ($effect/onMount). Allocations
-        // inside helper functions or DOM/event callbacks are not this rule's
-        // responsibility.
+        // `onDestroy(cleanup)` — resolve the referenced local function. If it
+        // can't be found (e.g. imported from another file), assume the external
+        // teardown handles it and suppress all warnings for this file.
+        if (callback.type === 'Identifier') {
+          const body = findFunctionBodyInAncestors(callback.name, ancestors);
+          if (body) collectClearances(body, clearedInHooks);
+          else clearedInHooks.add('*');
+        }
+        return;
+      }
+
+      // Svelte 5 runes: `$effect(() => { ... return () => ... })`. Immediately
+      // record clearances anywhere in the effect subtree (including inside the
+      // returned cleanup function) so effect-scoped allocations are recognized
+      // as teardown-cleared.
+      if (CLEANUP_RETURN_CONTAINERS.has(name)) {
+        const callback = node.arguments[0];
         if (
-          LEAKY_CALLS.has(name) &&
-          (!tracker.isNestedInFunction() || tracker.isNestedInReactiveEffect(REACTIVE_LEAK_CONTAINERS))
+          callback &&
+          (callback.type === 'ArrowFunctionExpression' || callback.type === 'FunctionExpression') &&
+          callback.body &&
+          (callback.body.type === 'BlockStatement' || callback.body.type === 'FunctionBody')
         ) {
-          const isAllowlisted =
-            callee.type === 'Identifier'
-              ? context.isAllowlisted(name, 'function')
-              : context.isAllowlisted(name, 'method');
+          pendingCleanupReturnFn = callback;
+        }
+        return;
+      }
 
-          if (!isAllowlisted) {
-            const target = getAllocationTarget(parent, undefined, context.isAllowlisted);
-            if (target.name && !target.isHandledExternally && !target.isCollection) {
-              allocations.push({ name: target.name, node });
-            }
+      // Record anywhere-else clearances into the tracker so effect-scoped
+      // allocations can be validated against the effect's own teardown.
+      if (TEARDOWN_CALLS.has(name)) {
+        const cleared =
+          callee.type === 'Identifier'
+            ? getExpressionName(node.arguments[0])
+            : getExpressionName(callee.object);
+        if (cleared) tracker.addClearance(cleared);
+        return;
+      }
+
+      // Track allocations made directly in the component scope, as well as
+      // allocations inside reactive wrappers ($effect/onMount). Allocations
+      // inside helper functions or DOM/event callbacks are not this rule's
+      // responsibility.
+      if (
+        LEAKY_CALLS.has(name) &&
+        (!tracker.isNestedInFunction() || tracker.isNestedInReactiveEffect(REACTIVE_LEAK_CONTAINERS))
+      ) {
+        const isAllowlisted =
+          callee.type === 'Identifier'
+            ? context.isAllowlisted(name, 'function')
+            : context.isAllowlisted(name, 'method');
+
+        if (!isAllowlisted) {
+          const target = getAllocationTarget(parent, undefined, context.isAllowlisted);
+          if (target.name && !target.isHandledExternally && !target.isCollection) {
+            allocations.push({ name: target.name, node, scopeId: tracker.currentScopeId() });
           }
         }
-      },
-
-      'Program:exit'() {
-        if (clearedInHooks.has('*')) return;
-        for (const alloc of allocations) {
-          if (alloc.name && !clearedInHooks.has(alloc.name)) {
-            context.report({
-              ruleId: 'svelte/missing-ondestroy',
-              message: `Resource '${alloc.name}' is allocated in the component scope but never cleared in onDestroy.`,
-              suggestion: `Call clearInterval(${alloc.name}) (or the appropriate cleanup) inside onDestroy().`,
-              line: alloc.node.loc?.start?.line ?? 1,
-              column: alloc.node.loc?.start?.column ?? 0,
-            });
-          }
-        }
-      },
+      }
     };
 
-    attachScopeListeners(tracker, visitor);
+    visitor['Program:exit'] = () => {
+      if (clearedInHooks.has('*')) return;
+      for (const alloc of allocations) {
+        if (!alloc.name) continue;
+
+        // An allocation inside `$effect`/`onMount` is also considered cleared
+        // when the callback's own returned cleanup function releases it.
+        const container = findEnclosingCleanupReturnScope(alloc.scopeId);
+        const clearedInContainer = container
+          ? tracker.isClearedWithin(alloc.name, alloc.scopeId, container.scopeId)
+          : false;
+
+        if (!clearedInHooks.has(alloc.name) && !clearedInContainer) {
+          context.report({
+            ruleId: 'svelte/missing-ondestroy',
+            message: `Resource '${alloc.name}' is allocated in the component scope but never cleared in onDestroy.`,
+            suggestion: `Call clearInterval(${alloc.name}) (or the appropriate cleanup) inside onDestroy().`,
+            line: alloc.node.loc?.start?.line ?? 1,
+            column: alloc.node.loc?.start?.column ?? 0,
+          });
+        }
+      }
+    };
+
     return visitor;
   },
 };

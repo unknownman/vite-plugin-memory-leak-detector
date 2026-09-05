@@ -181,6 +181,38 @@ describe('react/react-useeffect-cleanup', () => {
     const diagnostics = runRule(reactUseEffectCleanupRule, code);
     expect(diagnostics).toHaveLength(0);
   });
+
+  it('detects leaky custom effect hooks (use*Effect)', () => {
+    const code = `
+      useMyCustomEffect(() => {
+        setInterval(tick, 1000);
+      }, []);
+    `;
+    const diagnostics = runRule(reactUseEffectCleanupRule, code);
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0].message).toContain('does not return a cleanup function');
+  });
+
+  it('allows custom effect hooks that return a cleanup function', () => {
+    const code = `
+      useUpdateEffect(() => {
+        const id = setInterval(tick, 1000);
+        return () => clearInterval(id);
+      }, []);
+    `;
+    const diagnostics = runRule(reactUseEffectCleanupRule, code);
+    expect(diagnostics).toHaveLength(0);
+  });
+
+  it('detects leaks in custom layout-effect wrappers', () => {
+    const code = `
+      useIsomorphicLayoutEffect(() => {
+        window.addEventListener('resize', handleResize);
+      }, []);
+    `;
+    const diagnostics = runRule(reactUseEffectCleanupRule, code);
+    expect(diagnostics).toHaveLength(1);
+  });
 });
 
 describe('vue/missing-onunmounted', () => {
@@ -294,6 +326,43 @@ describe('vue/missing-onunmounted', () => {
       watch(() => {
         const id = setInterval(tick, 1000);
         onUnmounted(() => clearInterval(id));
+      });
+    `;
+    const diagnostics = runRule(vueMissingOnUnmountedRule, code);
+    expect(diagnostics).toHaveLength(0);
+  });
+
+  it('allows a watchEffect allocation cleared via onCleanup', () => {
+    const code = `
+      import { watchEffect } from 'vue';
+      watchEffect((onCleanup) => {
+        const id = setInterval(tick, 1000);
+        onCleanup(() => clearInterval(id));
+      });
+    `;
+    const diagnostics = runRule(vueMissingOnUnmountedRule, code);
+    expect(diagnostics).toHaveLength(0);
+  });
+
+  it('flags a watchEffect allocation when onCleanup clears a different resource', () => {
+    const code = `
+      import { watchEffect } from 'vue';
+      watchEffect((onCleanup) => {
+        const id = setInterval(tick, 1000);
+        onCleanup(() => clearInterval(other));
+      });
+    `;
+    const diagnostics = runRule(vueMissingOnUnmountedRule, code);
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0].message).toContain("Resource 'id'");
+  });
+
+  it('allows a watch allocation cleared via the 3rd callback parameter', () => {
+    const code = `
+      import { watch } from 'vue';
+      watch(source, (value, oldValue, onCleanup) => {
+        const id = setInterval(tick, 1000);
+        onCleanup(() => clearInterval(id));
       });
     `;
     const diagnostics = runRule(vueMissingOnUnmountedRule, code);
@@ -440,6 +509,54 @@ describe('svelte/missing-ondestroy', () => {
       $effect(() => {
         const id = setInterval(tick, 1000);
         onDestroy(() => clearInterval(id));
+      });
+    `;
+    const diagnostics = runRule(svelteMissingOnDestroyRule, code);
+    expect(diagnostics).toHaveLength(0);
+  });
+
+  it('allows a $effect allocation cleared by the returned cleanup function', () => {
+    const code = `
+      $effect(() => {
+        const id = setInterval(tick, 1000);
+        return () => clearInterval(id);
+      });
+    `;
+    const diagnostics = runRule(svelteMissingOnDestroyRule, code);
+    expect(diagnostics).toHaveLength(0);
+  });
+
+  it('allows a $effect allocation cleared by a stateful cleanup returning block', () => {
+    const code = `
+      $effect(() => {
+        const id = setInterval(tick, 1000);
+        return () => {
+          clearInterval(id);
+        };
+      });
+    `;
+    const diagnostics = runRule(svelteMissingOnDestroyRule, code);
+    expect(diagnostics).toHaveLength(0);
+  });
+
+  it('flags a $effect allocation when the returned cleanup clears a different resource', () => {
+    const code = `
+      $effect(() => {
+        const id = setInterval(tick, 1000);
+        return () => clearInterval(other);
+      });
+    `;
+    const diagnostics = runRule(svelteMissingOnDestroyRule, code);
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0].message).toContain("Resource 'id'");
+  });
+
+  it('allows an onMount allocation cleared by its returned cleanup function', () => {
+    const code = `
+      import { onMount } from 'svelte';
+      onMount(() => {
+        const id = setInterval(tick, 1000);
+        return () => clearInterval(id);
       });
     `;
     const diagnostics = runRule(svelteMissingOnDestroyRule, code);

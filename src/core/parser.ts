@@ -71,44 +71,65 @@ function attachLazyLoc(node: Record<string, unknown>, lineStarts: number[]): voi
 }
 
 /**
- * OXC emits oxc-specific node names (`StaticMemberExpression`,
- * `ComputedMemberExpression`, `FunctionBody`) and no `loc` field. This reviver
- * runs inline while hydrating the serialized AST via `JSON.parse`, so the
- * lightweight ESTree normalization happens in the same single pass as
- * hydration — no separate recursive traversal of the tree is needed.
+ * Normalizes an OXC native AST (returned directly as an in-memory JS object
+ * graph, no JSON serialization involved) into ESTree conventions in place.
+ *
+ * Modern OXC already emits ESTree-friendly shapes (`MemberExpression`,
+ * `BlockStatement`, a plain array of `params`), so the type coercions below are
+ * defensive aliases for the oxc-specific node names emitted by older dialects.
+ * The real cost of this pass is attaching the lazy `loc` getter to every node —
+ * after that, traversal needs no further work. An explicit work stack keeps the
+ * walk from recursing deeply and overflowing the call stack on pathological
+ * inputs.
  */
-function reviveOxcAst(key: string, value: unknown, lineStarts: number[]): unknown {
-  if (!value || typeof value !== 'object') return value;
-  const type = (value as { type?: unknown }).type;
-  if (typeof type !== 'string') return value;
+export function normalizeAstInPlace(root: Record<string, unknown> | null | undefined, lineStarts: number[]): void {
+  if (!root || typeof root !== 'object') return;
 
-  const node = value as Record<string, unknown>;
-  if (type === 'StaticMemberExpression' || type === 'ComputedMemberExpression') {
-    // Add ESTree-standard member expression names.
-    node['type'] = 'MemberExpression';
-    // ComputedMemberExpression was computed; StaticMemberExpression was not.
-    node['computed'] = type === 'ComputedMemberExpression';
-    // OXC names the computed member's key `expression`; ESTree (and the rules)
-    // expect `property`.
-    if (type === 'ComputedMemberExpression' && node['expression'] !== undefined) {
-      node['property'] = node['expression'];
+  const stack: Record<string, unknown>[] = [root];
+
+  while (stack.length > 0) {
+    const node = stack.pop() as Record<string, unknown>;
+    if (!node || typeof node !== 'object') continue;
+
+    const type = node['type'];
+    if (typeof type === 'string') {
+      if (type === 'StaticMemberExpression' || type === 'ComputedMemberExpression') {
+        // OXC's pre-ESTree member names; add the standard name and `computed`.
+        node['type'] = 'MemberExpression';
+        node['computed'] = type === 'ComputedMemberExpression';
+        // OXC names the computed member's key `expression`; ESTree (and the
+        // rules) expect `property`.
+        if (type === 'ComputedMemberExpression' && node['expression'] !== undefined) {
+          node['property'] = node['expression'];
+        }
+      } else if (type === 'FunctionBody') {
+        // Normalize oxc's function block body to ESTree BlockStatement.
+        node['type'] = 'BlockStatement';
+        const statements = node['statements'];
+        if (Array.isArray(statements)) {
+          node['body'] = statements;
+          delete node['statements'];
+        }
+      }
+
+      if (typeof node['start'] === 'number') {
+        attachLazyLoc(node, lineStarts);
+      }
     }
-  } else if (type === 'FunctionBody') {
-    // Normalize oxc's function block body to ESTree BlockStatement.
-    node['type'] = 'BlockStatement';
-    const statements = node['statements'];
-    if (Array.isArray(statements)) {
-      node['body'] = statements;
-      delete node['statements'];
+
+    for (const key of Object.keys(node)) {
+      const value = node[key];
+      if (value && typeof value === 'object') {
+        if (Array.isArray(value)) {
+          for (const item of value) {
+            if (item && typeof item === 'object') stack.push(item as Record<string, unknown>);
+          }
+        } else {
+          stack.push(value as Record<string, unknown>);
+        }
+      }
     }
   }
-
-  // Attach a lazy loc getter so line numbers are only computed on demand.
-  if (typeof node['start'] === 'number') {
-    attachLazyLoc(node, lineStarts);
-  }
-
-  return value;
 }
 
 const SOURCE_EXTENSION_RE = /\.(js|jsx|mjs|cjs|ts|tsx|mts|cts)$/;
@@ -124,33 +145,36 @@ function toParsableFilename(filename: string): string {
 }
 
 /**
- * Safely parses code into an ESTree AST using OXC.
- * Type normalization happens during JSON hydration via a reviver, and `loc`
- * data is attached lazily (only computed when a rule reports a diagnostic).
+ * Safely parses code into an ESTree-compatible AST using OXC.
+ *
+ * OXC (>= 0.148) deserializes the AST to native JS objects directly — there is
+ * no JSON round-trip — so `program` is normalized in place via
+ * `normalizeAstInPlace`, which attaches lazy `loc` getters (line/column are
+ * only computed when a rule reports a diagnostic).
+ *
  * Returns the AST and any parsing errors encountered.
  */
 export function parseCode(code: string, filename = 'module.tsx'): ParseResult {
   try {
-    const result = parseSync(code, {
+    const result = parseSync(toParsableFilename(filename), code, {
       sourceType: 'module',
-      sourceFilename: toParsableFilename(filename),
     });
 
-    const errors = (result.errors ?? []).map((e) => new Error(String(e) || 'Parse error'));
-    if (!result.program) {
+    const errors = (result.errors ?? []).map((e) => {
+      const message =
+        typeof e === 'object' && e !== null && 'message' in e ? String(e.message) : String(e);
+      return new Error(message || 'Parse error');
+    });
+
+    const program = result.program as unknown as Record<string, unknown> | null | undefined;
+    if (!program || program['type'] !== 'Program') {
       return { ast: null, errors: errors.length ? errors : [new Error('Failed to parse code')] };
     }
 
     const lineStarts = buildLineStarts(code);
-    // OXC serializes the AST as a JSON string; hydrate and normalize it in one pass.
-    const ast: Program = JSON.parse(result.program, (key, value) =>
-      reviveOxcAst(key, value, lineStarts)
-    );
-    if (!ast || ast.type !== 'Program') {
-      return { ast: null, errors: errors.length ? errors : [new Error('Failed to parse code')] };
-    }
+    normalizeAstInPlace(program, lineStarts);
 
-    return { ast, errors };
+    return { ast: program as unknown as Program, errors };
   } catch (error) {
     return {
       ast: null,

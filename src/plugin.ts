@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import type { Plugin, ViteDevServer } from 'vite';
 import { createFilter } from '@rollup/pluginutils';
 import pc from 'picocolors';
@@ -8,8 +9,8 @@ import { resolvePluginConfig } from './config/index.js';
 import { LeakDetectorEngine } from './core/engine.js';
 import { extractSource } from './core/extractors/index.js';
 import { builtinRules } from './rules/index.js';
-import { rollupReporter } from './reporter/rollup.js';
 import { dispatchReports } from './reporter/index.js';
+import { consoleReporter } from './reporter/console.js';
 import { BaselineManager } from './core/baseline.js';
 
 export function memoryLeakDetectorPlugin(options: PluginOptions = {}): Plugin {
@@ -21,12 +22,91 @@ export function memoryLeakDetectorPlugin(options: PluginOptions = {}): Plugin {
 
   const engine = new LeakDetectorEngine(config);
 
-  // Per-file diagnostic cache. In `vite dev`, Vite's transform cache ensures
-  // only changed files get re-analyzed — this map cleanly replaces old state
-  // without running a full project scan.
+  // Per-file diagnostic cache, keyed by the bare physical path. In `vite dev`,
+  // Vite's own transform cache decides which files get re-analyzed; this map
+  // holds the *latest* known diagnostics so summarize/buildEnd always see the
+  // current state, whether or not Vite re-ran our transform hook.
   const diagnosticMap = new Map<string, Diagnostic[]>();
   let isBuild = false;
-  let emittedViaRollup = false;
+
+  const hasTerminalReport = () =>
+    config.mode !== 'report-only' &&
+    config.reports.some((r) => r.format === 'stylish' || r.format === 'default');
+
+  const normalizedIdOf = (id: string) => id.split('?')[0];
+
+  const isRelevant = (id: string) => filter(normalizedIdOf(id));
+
+  // --- Terminal reporting -----------------------------------------------------
+  // Real-time warnings are printed from the dev-server side (handleHotUpdate +
+  // debounced summaries) instead of the `transform` hook. Vite aggressively
+  // caches transformed modules, so relying on `transform` alone makes warnings
+  // disappear on server restarts or cache hits. The debounced full summary
+  // re-prints totals once a batch of changes settles.
+  let summaryTimer: ReturnType<typeof setTimeout> | null = null;
+  let printedSummaryKey = '';
+
+  function scheduleFullSummary(delay = 1200) {
+    if (summaryTimer) clearTimeout(summaryTimer);
+    summaryTimer = setTimeout(() => {
+      summaryTimer = null;
+      printFullSummary();
+    }, delay);
+  }
+
+  function printFullSummary() {
+    if (!hasTerminalReport() || isBuild) return;
+    if (diagnosticMap.size === 0) return;
+
+    const allDiagnostics = Array.from(diagnosticMap.values()).flat();
+    if (allDiagnostics.length === 0) return;
+
+    const stateKey = Array.from(diagnosticMap.entries())
+      .map(([file, diags]) => `${file}:${diags.length}`)
+      .join('|');
+    if (stateKey === printedSummaryKey) return;
+    printedSummaryKey = stateKey;
+
+    consoleReporter(allDiagnostics, undefined, { verbose: false });
+  }
+
+  /**
+   * Re-analyzes a single changed source file (reading the current content from
+   * disk) and prints a stylish terminal report for just that file. Used from
+   * `handleHotUpdate` so warnings survive cases where Vite's transform cache
+   * short-circuits our transform hook.
+   */
+  async function reportChangedFile(id: string) {
+    const normalizedId = normalizedIdOf(id);
+    if (!filter(normalizedId)) return;
+    if (isBuild) return;
+
+    let code: string;
+    try {
+      code = fs.readFileSync(normalizedId, 'utf8');
+    } catch {
+      return;
+    }
+
+    let extraction;
+    try {
+      extraction = await extractSource(normalizedId, code);
+    } catch {
+      return;
+    }
+    if (!extraction) return;
+
+    const diagnostics = engine.analyze(normalizedId, code, extraction);
+    if (diagnostics.length === 0) {
+      diagnosticMap.delete(normalizedId);
+      return;
+    }
+
+    diagnosticMap.set(normalizedId, diagnostics);
+
+    if (!hasTerminalReport()) return;
+    consoleReporter(diagnostics, code);
+  }
 
   return {
     name: 'vite-plugin-memory-leak-detector',
@@ -38,26 +118,49 @@ export function memoryLeakDetectorPlugin(options: PluginOptions = {}): Plugin {
       isBuild = viteConfig.command === 'build';
     },
 
-    buildStart() {
-      emittedViaRollup = false;
-    },
-
-    // 2. Clean up cache on file deletion during dev mode
+    // 2. Dev-server lifecycle: keep the cache tidy, refresh totals when a batch
+    // of changes settles, and surface an initial summary after a restart even if
+    // the changed files were served from Vite's transform cache.
     configureServer(server: ViteDevServer) {
-      server.watcher.on('unlink', (id) => {
-        // Filesystem events never carry query strings; normalize so the key
-        // matches the keys written by `transform` below.
-        diagnosticMap.delete(id.split('?')[0]);
+      server.watcher.on('all', (event, id) => {
+        const path = String(id);
+        const normalizedId = normalizedIdOf(path);
+
+        if (event === 'unlink' || event === 'unlinkDir') {
+          // Filesystem events never carry query strings; normalize so the key
+          // matches the keys written by `transform` / `reportChangedFile`.
+          diagnosticMap.delete(normalizedId);
+        }
+
+        if (isRelevant(path)) {
+          scheduleFullSummary();
+        }
       });
+
+      // After a fresh `vite dev` start (or a server restart followed by a page
+      // reload), the initial transforms re-populate the map. Once things quiet
+      // down, print the full summary so warnings reappear in the terminal even
+      // when individual modules were served from cache.
+      scheduleFullSummary(1500);
     },
 
     // 3. Process each file
+    buildStart() {
+      // A fresh build/serve cycle begins; drop any pending dev-mode summary
+      // timers and allow summaries to re-print for the new batch of files.
+      if (summaryTimer) {
+        clearTimeout(summaryTimer);
+        summaryTimer = null;
+      }
+      printedSummaryKey = '';
+    },
+
     async transform(code, id) {
       // Virtual modules (e.g. `App.vue?vue&type=script`, `App.ts?raw`) are
       // slices of their primary file and are already covered by this primary
       // transform. The cache is keyed by the bare physical path so each file
       // holds exactly one entry and HMR updates/unlinks never leak or wipe it.
-      const normalizedId = id.split('?')[0];
+      const normalizedId = normalizedIdOf(id);
       if (!filter(normalizedId)) return null;
       if (normalizedId !== id) return null;
 
@@ -74,26 +177,28 @@ export function memoryLeakDetectorPlugin(options: PluginOptions = {}): Plugin {
 
       diagnosticMap.set(normalizedId, diagnostics);
 
-      // Real-time terminal/browser reporting
-      if (config.mode !== 'report-only') {
-        const hasTerminalReport = config.reports.some(
-          (r) => r.format === 'stylish' || r.format === 'default'
-        );
-
-        if (hasTerminalReport) {
-          // Never call context.error() during transform — it fatally aborts the
-          // module chain. Emit everything as warnings here; the build is only
-          // failed via context.error() in buildEnd when thresholds are exceeded.
-          rollupReporter(this, diagnostics);
-          emittedViaRollup = true;
-        }
+      // Schedule a debounced full summary so a freshly-loaded page (or an HMR
+      // refresh) prints its warnings once the module graph quiets down. Dev-only
+      // — build reporting is handled once in buildEnd.
+      if (hasTerminalReport() && !isBuild) {
+        scheduleFullSummary();
       }
 
       // We do not mutate the code; this is purely an analysis plugin.
       return null;
     },
 
-    // 4. Summarize, report, and assert thresholds at the end of the build
+    // 4. Live per-file reporting on HMR updates. This runs for a watched source
+    // file whenever it changes during `vite dev` — regardless of whether the
+    // transform hook fires — so memory leak warnings never disappear from the
+    // terminal due to Vite caching transformed output.
+    async handleHotUpdate(ctx) {
+      const { file } = ctx;
+      reportChangedFile(file);
+      return undefined;
+    },
+
+    // 5. Summarize, report, and assert thresholds at the end of the build
     buildEnd(error) {
       // Only run the heavy summary during a full build, unless the build already failed
       if (!isBuild || error) return;
@@ -111,15 +216,8 @@ export function memoryLeakDetectorPlugin(options: PluginOptions = {}): Plugin {
         );
       }
 
-      // Only dispatch terminal/stylish reports if they were NOT already emitted via rollupReporter,
-      // and skip them in dev mode since Vite outputs warnings during HMR transforms.
-      const shouldSkipTerminalReports = emittedViaRollup || !isBuild;
-      const reportsToDispatch = shouldSkipTerminalReports
-        ? config.reports.filter((r) => r.format !== 'stylish' && r.format !== 'default')
-        : config.reports;
-
-      // Dispatch structured reports (HTML, SARIF, Markdown, JSON)
-      dispatchReports(allDiagnostics, reportsToDispatch, config.outputDir);
+      // Dispatch structured reports (HTML, SARIF, Markdown, JSON, stylish)
+      dispatchReports(allDiagnostics, config.reports, config.outputDir);
 
       if (config.mode === 'report-only') {
         console.log(
