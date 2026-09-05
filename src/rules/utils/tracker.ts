@@ -8,6 +8,9 @@ export function getExpressionName(node: any): string | null {
   if (node.type === 'Identifier') return node.name;
   if (node.type === 'ThisExpression') return 'this';
 
+  // `obj?.timer` is wrapped in a ChainExpression by ESTree.
+  if (node.type === 'ChainExpression') return getExpressionName(node.expression);
+
   if (node.type === 'MemberExpression') {
     const obj = getExpressionName(node.object);
     const prop = node.computed
@@ -19,6 +22,34 @@ export function getExpressionName(node: any): string | null {
     if (obj && prop) return `${obj}.${prop}`;
   }
   return null;
+}
+
+/**
+ * Recursively extracts every bound identifier from a binding pattern.
+ * Supports `Identifier`, `ObjectPattern`, `ArrayPattern`, `AssignmentPattern`
+ * (destructuring defaults) and `RestElement` (rest/spread) nodes, including
+ * arbitrarily nested combinations.
+ */
+export function extractIdentifiersFromPattern(pattern: any): string[] {
+  if (!pattern) return [];
+  switch (pattern.type) {
+    case 'Identifier':
+      return [pattern.name];
+    case 'ObjectPattern':
+      return (pattern.properties ?? []).flatMap((prop: any) =>
+        prop ? extractIdentifiersFromPattern(prop.type === 'RestElement' ? prop.argument : prop.value) : []
+      );
+    case 'ArrayPattern':
+      return (pattern.elements ?? []).flatMap((element: any) =>
+        element ? extractIdentifiersFromPattern(element.type === 'RestElement' ? element.argument : element) : []
+      );
+    case 'AssignmentPattern':
+      return extractIdentifiersFromPattern(pattern.left);
+    case 'RestElement':
+      return extractIdentifiersFromPattern(pattern.argument);
+    default:
+      return [];
+  }
 }
 
 /**
@@ -115,6 +146,22 @@ export function getAllocationTarget(
       return { name: null, isHandledExternally: false, isCollection: false };
     }
 
+    // { timer: setInterval(...) } — the allocation is bound to the property
+    // key, so a destructured variable of the same name can be cleared.
+    if (curr.type === 'Property' || curr.type === 'ObjectProperty') {
+      return {
+        name: curr.key && curr.key.type === 'Identifier' ? curr.key.name : null,
+        isHandledExternally: false,
+        isCollection: false,
+      };
+    }
+
+    // [setInterval(...)] — the allocation is captured by an array literal,
+    // which the consumer owns; treat it like a collection.
+    if (curr.type === 'ArrayExpression') {
+      return { name: null, isHandledExternally: false, isCollection: true };
+    }
+
     // Pass through conditionals, logical expressions, and type wrappers
     if (PASS_THROUGH_TYPES.has(curr.type)) {
       continue;
@@ -130,4 +177,67 @@ export function getAllocationTarget(
   }
 
   return { name: null, isHandledExternally: false, isCollection: false };
+}
+
+/**
+ * Returns true when an `addEventListener` call passes an `AbortSignal` via its
+ * options argument (e.g. `{ signal: controller.signal }`), indicating the
+ * listener is managed by an AbortController rather than removeEventListener.
+ */
+export function isManagedByAbortSignal(optionsArg: any): boolean {
+  if (!optionsArg || optionsArg.type !== 'ObjectExpression') return false;
+  return (optionsArg.properties ?? []).some(
+    (prop: any) =>
+      prop &&
+      (prop.type === 'Property' || prop.type === 'ObjectProperty') &&
+      prop.key &&
+      prop.key.type === 'Identifier' &&
+      prop.key.name === 'signal'
+  );
+}
+
+/**
+ * Searches the innermost containing Program/BlockStatement(s) for a local
+ * function that an `Identifier` argument references: either a
+ * `FunctionDeclaration` or a `VariableDeclarator` initialized with a function.
+ * Returns the found function body node, or null when the identifier resolves to
+ * nothing local (e.g. an import).
+ */
+export function findFunctionBodyInAncestors(identifierName: string, ancestors?: any[]): any {
+  if (!ancestors || ancestors.length === 0) return null;
+
+  for (let i = ancestors.length - 1; i >= 0; i--) {
+    const container = ancestors[i];
+    if (
+      !container ||
+      (container.type !== 'Program' && container.type !== 'BlockStatement')
+    ) {
+      continue;
+    }
+    const body = container.body;
+    if (!Array.isArray(body)) continue;
+
+    for (const stmt of body) {
+      if (!stmt) continue;
+
+      if (stmt.type === 'FunctionDeclaration' && stmt.id && stmt.id.name === identifierName) {
+        return stmt.body;
+      }
+
+      if (stmt.type === 'VariableDeclaration') {
+        const declarator = (stmt.declarations ?? []).find(
+          (d: any) => d && d.id && d.id.type === 'Identifier' && d.id.name === identifierName
+        );
+        if (!declarator) continue;
+        const init = declarator.init;
+        if (
+          init &&
+          (init.type === 'ArrowFunctionExpression' || init.type === 'FunctionExpression')
+        ) {
+          return init.body;
+        }
+      }
+    }
+  }
+  return null;
 }

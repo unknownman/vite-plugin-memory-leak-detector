@@ -148,6 +148,17 @@ describe('react/react-useeffect-cleanup', () => {
     const diagnostics = runRule(reactUseEffectCleanupRule, code);
     expect(diagnostics).toHaveLength(0);
   });
+
+  it('allows addEventListener with an AbortSignal and no cleanup', () => {
+    const code = `
+      useEffect(() => {
+        const handler = () => {};
+        window.addEventListener('resize', handler, { signal: ctrl.signal });
+      }, []);
+    `;
+    const diagnostics = runRule(reactUseEffectCleanupRule, code);
+    expect(diagnostics).toHaveLength(0);
+  });
 });
 
 describe('vue/missing-onunmounted', () => {
@@ -252,6 +263,37 @@ describe('vue/missing-onunmounted', () => {
     const diagnostics = runRule(vueMissingOnUnmountedRule, code);
     expect(diagnostics).toHaveLength(0);
   });
+
+  it('allows onUnmounted referencing a local cleanup function', () => {
+    const code = `
+      const id = setInterval(tick, 1000);
+      const cleanup = () => clearInterval(id);
+      onUnmounted(cleanup);
+    `;
+    const diagnostics = runRule(vueMissingOnUnmountedRule, code);
+    expect(diagnostics).toHaveLength(0);
+  });
+
+  it('allows onUnmounted referencing an external (imported) cleanup function', () => {
+    const code = `
+      import { cleanup } from './utils';
+      const id = setInterval(tick, 1000);
+      onUnmounted(cleanup);
+    `;
+    const diagnostics = runRule(vueMissingOnUnmountedRule, code);
+    expect(diagnostics).toHaveLength(0);
+  });
+
+  it('flags allocations when the referenced cleanup does not clear anything', () => {
+    const code = `
+      const cleanup = () => console.log('no-op');
+      const id = setInterval(tick, 1000);
+      onUnmounted(cleanup);
+    `;
+    const diagnostics = runRule(vueMissingOnUnmountedRule, code);
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0].message).toContain("Resource 'id'");
+  });
 });
 
 describe('svelte/missing-ondestroy', () => {
@@ -296,18 +338,16 @@ describe('svelte/missing-ondestroy', () => {
     expect(diagnostics).toHaveLength(1);
   });
 
-  it('flags only the uncleared resource when two allocations exist but only one is cleared', () => {
+  it('allows onDestroy referencing a local cleanup function', () => {
     const code = `
-      import { onDestroy } from 'svelte';
-      const timerA = setInterval(tick, 1000);
-      const timerB = setInterval(tock, 2000);
-      onDestroy(() => {
-        clearInterval(timerA);
-      });
+      const id = setInterval(tick, 1000);
+      function cleanup() {
+        clearInterval(id);
+      }
+      onDestroy(cleanup);
     `;
     const diagnostics = runRule(svelteMissingOnDestroyRule, code);
-    expect(diagnostics).toHaveLength(1);
-    expect(diagnostics[0].message).toContain("Resource 'timerB'");
+    expect(diagnostics).toHaveLength(0);
   });
 });
 
@@ -365,5 +405,15 @@ describe('solid/missing-oncleanup', () => {
     const diagnostics = runRule(solidMissingOnCleanupRule, code);
     expect(diagnostics).toHaveLength(1);
     expect(diagnostics[0].message).toContain("Resource 'timerB'");
+  });
+
+  it('allows onCleanup referencing a local cleanup function', () => {
+    const code = `
+      const id = setInterval(tick, 1000);
+      const cleanup = () => clearInterval(id);
+      onCleanup(cleanup);
+    `;
+    const diagnostics = runRule(solidMissingOnCleanupRule, code);
+    expect(diagnostics).toHaveLength(0);
   });
 });

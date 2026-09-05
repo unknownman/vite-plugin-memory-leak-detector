@@ -227,6 +227,76 @@ describe('no-uncleared-timers', () => {
     const diagnostics = runRule(noUnclearedTimersRule, code);
     expect(diagnostics).toHaveLength(0);
   });
+
+  it('allows timers destructured from an object literal when cleared', () => {
+    const code = `
+      const { id } = { id: setInterval(() => {}, 1000) };
+      clearInterval(id);
+    `;
+    const diagnostics = runRule(noUnclearedTimersRule, code);
+    expect(diagnostics).toHaveLength(0);
+  });
+
+  it('allows timers destructured from array literal when cleared', () => {
+    const code = `
+      const [id] = [setInterval(() => {}, 1000)];
+      clearInterval(id);
+    `;
+    const diagnostics = runRule(noUnclearedTimersRule, code);
+    expect(diagnostics).toHaveLength(0);
+  });
+
+  it('detects destructured timer that is never cleared', () => {
+    const code = `
+      const { id } = { id: setInterval(() => {}, 1000) };
+      console.log(id);
+    `;
+    const diagnostics = runRule(noUnclearedTimersRule, code);
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0].message).toContain("Timer 'id'");
+  });
+
+  it('allows timer allocated and cleared inside a for loop block scope', () => {
+    const code = `
+      function setup() {
+        for (let i = 0; i < 3; i++) {
+          const id = setInterval(tick, 1000);
+          clearInterval(id);
+        }
+      }
+    `;
+    const diagnostics = runRule(noUnclearedTimersRule, code);
+    expect(diagnostics).toHaveLength(0);
+  });
+
+  it('flags timer cleared outside the switch case that declares it', () => {
+    const code = `
+      function setup(value) {
+        switch (value) {
+          case 1:
+            const id = setInterval(tick, 1000);
+            break;
+        }
+        clearInterval(id);
+      }
+    `;
+    const diagnostics = runRule(noUnclearedTimersRule, code);
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0].message).toContain("Timer 'id'");
+  });
+
+  it('allows timer cleared inside the same catch scope that declares it', () => {
+    const code = `
+      try {
+        run();
+      } catch (err) {
+        const id = setInterval(tick, 1000);
+        clearInterval(id);
+      }
+    `;
+    const diagnostics = runRule(noUnclearedTimersRule, code);
+    expect(diagnostics).toHaveLength(0);
+  });
 });
 
 describe('no-uncleared-animation-frames', () => {
@@ -301,6 +371,29 @@ describe('no-unregistered-listeners', () => {
     const diagnostics = runRule(noUnregisteredListenersRule, code);
     expect(diagnostics).toHaveLength(1);
     expect(diagnostics[0].message).toContain('never removed');
+  });
+
+  it('allows add and remove with optional-chained handlers', () => {
+    const code = `
+      window.addEventListener('resize', handlers?.resize);
+      window.removeEventListener('resize', handlers?.resize);
+    `;
+    const diagnostics = runRule(noUnregisteredListenersRule, code);
+    expect(diagnostics).toHaveLength(0);
+  });
+
+  it('allows listeners registered with an AbortSignal', () => {
+    const code = `
+      const handler = () => {};
+      window.addEventListener('resize', handler, { signal: ctrl.signal });
+    `;
+    const diagnostics = runRule(noUnregisteredListenersRule, code);
+    expect(diagnostics).toHaveLength(0);
+  });
+
+  it('flags anonymous listener on global target with AbortSignal options absent', () => {
+    const diagnostics = runRule(noUnregisteredListenersRule, `window.addEventListener('scroll', () => {});`);
+    expect(diagnostics).toHaveLength(1);
   });
 });
 

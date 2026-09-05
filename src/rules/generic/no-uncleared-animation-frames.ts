@@ -1,6 +1,6 @@
-import type { RuleContext, RuleDefinition } from '../../types/rule.js';
-import { getExpressionName, getAllocationTarget, getDeclarationKind } from '../utils/tracker.js';
-import { ScopeTracker } from '../utils/scope.js';
+import type { RuleContext, RuleDefinition, RuleVisitor } from '../../types/rule.js';
+import { getExpressionName, getAllocationTarget } from '../utils/tracker.js';
+import { ScopeTracker, attachScopeListeners } from '../utils/scope.js';
 
 export const noUnclearedAnimationFramesRule: RuleDefinition = {
   id: 'generic/no-uncleared-animation-frames',
@@ -19,26 +19,7 @@ export const noUnclearedAnimationFramesRule: RuleDefinition = {
       scopeId: number;
     }[] = [];
 
-    return {
-      Program() {
-        tracker.enterRootScope();
-      },
-
-      VariableDeclarator(node: any, parent: any) {
-        if (node.id.type === 'Identifier') {
-          tracker.declareVariable(node.id.name, getDeclarationKind(parent));
-        }
-      },
-
-      BlockStatement: () => tracker.enterScope('block'),
-      'BlockStatement:exit': () => tracker.leaveScope(),
-      FunctionDeclaration: () => tracker.enterScope('function'),
-      'FunctionDeclaration:exit': () => tracker.leaveScope(),
-      FunctionExpression: () => tracker.enterScope('function'),
-      'FunctionExpression:exit': () => tracker.leaveScope(),
-      ArrowFunctionExpression: () => tracker.enterScope('function'),
-      'ArrowFunctionExpression:exit': () => tracker.leaveScope(),
-
+    const visitor: RuleVisitor = {
       'Program:exit'() {
         for (const alloc of allocations) {
           if (alloc.isHandledExternally || alloc.isCollection) continue;
@@ -95,5 +76,7 @@ export const noUnclearedAnimationFramesRule: RuleDefinition = {
         }
       },
     };
+    attachScopeListeners(tracker, visitor);
+    return visitor;
   },
 };

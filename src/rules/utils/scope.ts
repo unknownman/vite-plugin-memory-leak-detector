@@ -1,3 +1,6 @@
+import type { RuleVisitor } from '../../types/rule.js';
+import { extractIdentifiersFromPattern, getDeclarationKind } from './tracker.js';
+
 export interface ScopedAllocation {
   name: string;
   scopeId: number;
@@ -166,4 +169,59 @@ export class ScopeTracker {
   getAllocations(): readonly ScopedAllocation[] {
     return this.allocations;
   }
+}
+
+const BLOCK_SCOPE_NODE_TYPES = ['BlockStatement', 'ForStatement', 'ForInStatement', 'ForOfStatement', 'SwitchStatement'];
+
+const FUNCTION_SCOPE_NODE_TYPES = ['FunctionDeclaration', 'FunctionExpression', 'ArrowFunctionExpression'];
+
+/**
+ * Injects the standard scope-listener visitors into a rule's visitor object so
+ * rules stay free of scope boilerplate. Handles:
+ *
+ *  - Program root scope.
+ *  - Block boundaries: BlockStatement, for/for-in/for-of loops, SwitchStatement.
+ *  - Function boundaries (with parameter declarations).
+ *  - CatchClause (with its bound parameter).
+ *  - VariableDeclarator declarations, including destructured patterns.
+ *
+ * Note: it sets `visitor[type]` unconditionally for these node types, so rules
+ * must not define their own handlers for them.
+ */
+export function attachScopeListeners(tracker: ScopeTracker, visitor: RuleVisitor): void {
+  visitor.Program = () => tracker.enterRootScope();
+
+  for (const type of BLOCK_SCOPE_NODE_TYPES) {
+    visitor[type] = () => tracker.enterScope('block');
+    visitor[`${type}:exit`] = () => tracker.leaveScope();
+  }
+
+  visitor.CatchClause = (node: any) => {
+    tracker.enterScope('block');
+    for (const name of extractIdentifiersFromPattern(node.param)) {
+      tracker.declareVariable(name, 'let');
+    }
+  };
+  visitor['CatchClause:exit'] = () => tracker.leaveScope();
+
+  for (const type of FUNCTION_SCOPE_NODE_TYPES) {
+    visitor[type] = (node: any) => {
+      tracker.enterScope('function');
+      const params: any[] =
+        node.params && node.params.type === 'FormalParameters' ? node.params.items ?? [] : node.params ?? [];
+      for (const param of params) {
+        for (const name of extractIdentifiersFromPattern(param)) {
+          tracker.declareVariable(name, 'let');
+        }
+      }
+    };
+    visitor[`${type}:exit`] = () => tracker.leaveScope();
+  }
+
+  visitor.VariableDeclarator = (node: any, parent: any) => {
+    const kind = getDeclarationKind(parent);
+    for (const name of extractIdentifiersFromPattern(node.id)) {
+      tracker.declareVariable(name, kind);
+    }
+  };
 }

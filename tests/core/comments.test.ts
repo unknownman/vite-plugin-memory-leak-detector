@@ -16,6 +16,22 @@ const timer = setInterval(() => {}, 1000);
     expect(handler.isSuppressed('any-rule', 3, directives)).toBe(true);
   });
 
+  it('ignore-next-line targets the first code line across blank lines', () => {
+    const code = `
+// memory-leak-ignore-next-line
+  
+         
+const timer = setInterval(() => {}, 1000);
+`;
+    const directives = handler.parseDirectives(code);
+    expect(directives).toHaveLength(1);
+    expect(directives[0].type).toBe('ignore-next-line');
+    expect(directives[0].line).toBe(2);
+    expect(directives[0].targetLine).toBe(5);
+    expect(handler.isSuppressed('any-rule', 5, directives)).toBe(true);
+    expect(handler.isSuppressed('any-rule', 3, directives)).toBe(false);
+  });
+
   it('parses ignore-line directive', () => {
     const code = `
 const a = 1; // memory-leak-ignore-line

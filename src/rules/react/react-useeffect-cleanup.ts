@@ -1,6 +1,6 @@
 import { walk } from 'estree-walker';
 import type { RuleContext, RuleDefinition } from '../../types/rule.js';
-import { getExpressionName, getAllocationTarget } from '../utils/tracker.js';
+import { getExpressionName, getAllocationTarget, isManagedByAbortSignal } from '../utils/tracker.js';
 
 const LEAKY_CALLS = [
   'setInterval',
@@ -89,6 +89,10 @@ function checkEffectBody(
           let isCollection = false;
 
           if (name === 'addEventListener') {
+            // Listeners registered with an AbortSignal are torn down automatically
+            // when the signal aborts, so they never need an explicit cleanup.
+            if (isManagedByAbortSignal(child.arguments[2])) return;
+
             // The resource is the handler function; anonymous handlers cannot
             // be tracked or removed by name.
             allocName = getExpressionName(child.arguments[1]);

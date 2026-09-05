@@ -1,11 +1,11 @@
 import { walk } from 'estree-walker';
-import type { RuleContext, RuleDefinition } from '../../types/rule.js';
+import type { RuleContext, RuleDefinition, RuleVisitor } from '../../types/rule.js';
 import {
   getExpressionName,
   getAllocationTarget,
-  getDeclarationKind,
+  findFunctionBodyInAncestors,
 } from '../utils/tracker.js';
-import { ScopeTracker } from '../utils/scope.js';
+import { ScopeTracker, attachScopeListeners } from '../utils/scope.js';
 
 const TEARDOWN_HOOKS = new Set(['onUnmounted', 'onBeforeUnmount']);
 
@@ -23,6 +23,34 @@ const TEARDOWN_CALLS = new Set([
 
 const LEAKY_CALLS = new Set(['setInterval', 'addEventListener', 'subscribe']);
 
+/**
+ * Walks a teardown callback body, collecting the names of every resource it
+ * explicitly clears into `clearedInHooks`.
+ */
+function collectClearances(body: any, clearedInHooks: Set<string>): void {
+  walk(body, {
+    enter(child: any) {
+      if (child.type !== 'CallExpression') return;
+      const callee = child.callee;
+      let cname = '';
+
+      if (callee.type === 'Identifier') {
+        cname = callee.name;
+      } else if (callee.type === 'MemberExpression' && callee.property.type === 'Identifier') {
+        cname = callee.property.name;
+      }
+
+      if (TEARDOWN_CALLS.has(cname)) {
+        const cleared =
+          callee.type === 'Identifier'
+            ? getExpressionName(child.arguments[0])
+            : getExpressionName(callee.object);
+        if (cleared) clearedInHooks.add(cleared);
+      }
+    },
+  });
+}
+
 export const vueMissingOnUnmountedRule: RuleDefinition = {
   id: 'vue/missing-onunmounted',
   description: 'Checks if subscriptions are created in Vue setup scope without being cleared in onUnmounted.',
@@ -34,27 +62,8 @@ export const vueMissingOnUnmountedRule: RuleDefinition = {
     const allocations: { name: string | null; node: any }[] = [];
     const clearedInHooks = new Set<string>();
 
-    return {
-      Program() {
-        tracker.enterRootScope();
-      },
-
-      BlockStatement: () => tracker.enterScope('block'),
-      'BlockStatement:exit': () => tracker.leaveScope(),
-      FunctionDeclaration: () => tracker.enterScope('function'),
-      'FunctionDeclaration:exit': () => tracker.leaveScope(),
-      FunctionExpression: () => tracker.enterScope('function'),
-      'FunctionExpression:exit': () => tracker.leaveScope(),
-      ArrowFunctionExpression: () => tracker.enterScope('function'),
-      'ArrowFunctionExpression:exit': () => tracker.leaveScope(),
-
-      VariableDeclarator(node: any, parent: any) {
-        if (node.id.type === 'Identifier') {
-          tracker.declareVariable(node.id.name, getDeclarationKind(parent));
-        }
-      },
-
-      CallExpression(node: any, parent: any) {
+    const visitor: RuleVisitor = {
+      CallExpression(node: any, parent: any, ancestors?: any[]) {
         const callee = node.callee;
         let name = '';
 
@@ -69,31 +78,20 @@ export const vueMissingOnUnmountedRule: RuleDefinition = {
         // Lifecycle teardown hook: collect the variable names it explicitly clears.
         if (TEARDOWN_HOOKS.has(name)) {
           const callback = node.arguments[0];
-          if (
-            callback &&
-            (callback.type === 'ArrowFunctionExpression' || callback.type === 'FunctionExpression')
-          ) {
-            walk(callback.body, {
-              enter(child: any) {
-                if (child.type !== 'CallExpression') return;
-                const c = child.callee;
-                let cname = '';
 
-                if (c.type === 'Identifier') {
-                  cname = c.name;
-                } else if (c.type === 'MemberExpression' && c.property.type === 'Identifier') {
-                  cname = c.property.name;
-                }
+          if (!callback) return;
+          if (callback.type === 'ArrowFunctionExpression' || callback.type === 'FunctionExpression') {
+            collectClearances(callback.body, clearedInHooks);
+            return;
+          }
 
-                if (TEARDOWN_CALLS.has(cname)) {
-                  const cleared =
-                    c.type === 'Identifier'
-                      ? getExpressionName(child.arguments[0])
-                      : getExpressionName(c.object);
-                  if (cleared) clearedInHooks.add(cleared);
-                }
-              },
-            });
+          // `onUnmounted(cleanup)` — resolve the referenced local function. If it
+          // can't be found (e.g. imported from another file), assume the external
+          // teardown handles it and suppress all warnings for this file.
+          if (callback.type === 'Identifier') {
+            const body = findFunctionBodyInAncestors(callback.name, ancestors);
+            if (body) collectClearances(body, clearedInHooks);
+            else clearedInHooks.add('*');
           }
           return;
         }
@@ -117,6 +115,7 @@ export const vueMissingOnUnmountedRule: RuleDefinition = {
       },
 
       'Program:exit'() {
+        if (clearedInHooks.has('*')) return;
         for (const alloc of allocations) {
           if (alloc.name && !clearedInHooks.has(alloc.name)) {
             context.report({
@@ -130,5 +129,8 @@ export const vueMissingOnUnmountedRule: RuleDefinition = {
         }
       },
     };
+
+    attachScopeListeners(tracker, visitor);
+    return visitor;
   },
 };

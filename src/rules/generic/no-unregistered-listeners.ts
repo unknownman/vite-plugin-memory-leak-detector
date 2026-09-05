@@ -1,6 +1,6 @@
-import type { RuleContext, RuleDefinition } from '../../types/rule.js';
-import { getExpressionName, getDeclarationKind } from '../utils/tracker.js';
-import { ScopeTracker } from '../utils/scope.js';
+import type { RuleContext, RuleDefinition, RuleVisitor } from '../../types/rule.js';
+import { getExpressionName, isManagedByAbortSignal } from '../utils/tracker.js';
+import { ScopeTracker, attachScopeListeners } from '../utils/scope.js';
 
 interface ListenerAdd {
   target: string;
@@ -28,26 +28,7 @@ export const noUnregisteredListenersRule: RuleDefinition = {
     const adds: ListenerAdd[] = [];
     const removes: ListenerRemove[] = [];
 
-    return {
-      Program() {
-        tracker.enterRootScope();
-      },
-
-      VariableDeclarator(node: any, parent: any) {
-        if (node.id.type === 'Identifier') {
-          tracker.declareVariable(node.id.name, getDeclarationKind(parent));
-        }
-      },
-
-      BlockStatement: () => tracker.enterScope('block'),
-      'BlockStatement:exit': () => tracker.leaveScope(),
-      FunctionDeclaration: () => tracker.enterScope('function'),
-      'FunctionDeclaration:exit': () => tracker.leaveScope(),
-      FunctionExpression: () => tracker.enterScope('function'),
-      'FunctionExpression:exit': () => tracker.leaveScope(),
-      ArrowFunctionExpression: () => tracker.enterScope('function'),
-      'ArrowFunctionExpression:exit': () => tracker.leaveScope(),
-
+    const visitor: RuleVisitor = {
       'Program:exit'() {
         for (const add of adds) {
           if (!add.handler && ['window', 'document', 'document.body'].includes(add.target)) {
@@ -98,6 +79,9 @@ export const noUnregisteredListenersRule: RuleDefinition = {
             const handler = getExpressionName(node.arguments[1]);
 
             if (method === 'addEventListener') {
+              // Listeners registered with an AbortSignal are torn down automatically
+              // when the signal aborts, so they never need a removeEventListener.
+              if (isManagedByAbortSignal(node.arguments[2])) return;
               adds.push({ target, event, handler, node, scopeId: tracker.currentScopeId() });
             } else {
               removes.push({ target, event, handler, scopeId: tracker.currentScopeId() });
@@ -106,5 +90,7 @@ export const noUnregisteredListenersRule: RuleDefinition = {
         }
       },
     };
+    attachScopeListeners(tracker, visitor);
+    return visitor;
   },
 };

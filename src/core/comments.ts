@@ -2,6 +2,24 @@ export interface SuppressionDirective {
   type: 'ignore-file' | 'ignore-next-line' | 'ignore-line' | 'ignore-start' | 'ignore-end';
   rules: string[]; // empty array means all rules
   line: number;
+  /** For `ignore-next-line`: the first code-bearing line below the comment. */
+  targetLine?: number;
+}
+
+/**
+ * Returns the first line below `commentLine` that contains non-whitespace
+ * content, ignoring blank lines between the comment and the code it targets.
+ * `lineStarts` maps NUL-terminated line offsets to line numbers.
+ */
+function getFirstContentLineAfter(
+  commentLine: number,
+  code: string,
+  lineStarts: number[]
+): number | undefined {
+  for (let i = commentLine + 1; i < lineStarts.length; i++) {
+    if (code.slice(lineStarts[i - 1], lineStarts[i]).trim().length > 0) return i;
+  }
+  return undefined;
 }
 
 export class CommentDirectivesHandler {
@@ -56,7 +74,12 @@ export class CommentDirectivesHandler {
           : [];
 
         if (action === 'ignore-next-line') {
-          directives.push({ type: 'ignore-next-line', rules, line: lineNum });
+          directives.push({
+            type: 'ignore-next-line',
+            rules,
+            line: lineNum,
+            targetLine: getFirstContentLineAfter(lineNum, code, lineStarts),
+          });
         } else if (action === 'ignore-line') {
           directives.push({ type: 'ignore-line', rules, line: lineNum });
         } else if (action === 'ignore') {
@@ -91,7 +114,7 @@ export class CommentDirectivesHandler {
       const matchesRule = dir.rules.length === 0 || dir.rules.includes(ruleId);
 
       if (dir.type === 'ignore-file' && matchesRule) return true;
-      if (dir.type === 'ignore-next-line' && dir.line + 1 === line && matchesRule) return true;
+      if (dir.type === 'ignore-next-line' && (dir.targetLine ?? dir.line + 1) === line && matchesRule) return true;
       if (dir.type === 'ignore-line' && dir.line === line && matchesRule) return true;
 
       // Track block start/end line by line
