@@ -1,8 +1,12 @@
 # demo.tape
-# This is a fully self-contained demo that creates a test project from scratch
-# Prereqs: docker (for npx/npm isolation it starts in the repo dir's nested temp
-# folder); node & npm must be installed and vite-plugin-memory-leak-detector must
-# be published to npm before the plugin can be installed inside the demo.
+# This is a fully self-contained demo that creates a test project from scratch.
+#
+# Run it from an EMPTY sandbox directory so every command acts on the fresh
+# project in place (no cd jumping, deterministic):
+#   mkdir -p /tmp/mld-demo && rm -rf /tmp/mld-demo/* && vhs /path/to/demo.tape
+#
+# Requires node + npm. The plugin is installed from the npm registry, so it must
+# be published before the demo runs.
 
 Output demo.gif
 
@@ -16,41 +20,31 @@ Set FontSize 16
 Set Width 1200
 Set Height 800
 Set Padding 32
-Set MarginBottom 4
+Set Margin 24
+Set MarginFill "#1e1e2e"
 Set TypingSpeed 35ms
-Set Framerate 60
+Set Framerate 45
 
 # ---------------------------------------------------------------
 # STEP 1 — Scaffold a brand-new Vite + React + TypeScript project
 # ---------------------------------------------------------------
-Hide
-Run "rm -rf memory-leak-demo"
-Show
-
 Type "# STEP 1 · Scaffold a brand-new Vite + React + TS project"
 Enter
 Sleep 700ms
 
-Type "npm create vite@latest memory-leak-demo -- --template react-ts"
+Type "npm create vite@latest . -- --template react-ts"
 Enter
 Hide
-Sleep 7000ms
-Type "n"
-Enter
-Sleep 19000ms
+Sleep 25000ms
 Show
 Sleep 400ms
 
-Type "cd memory-leak-demo"
-Enter
-Sleep 400ms
-
-Type "# Installing all project dependencies (this may take a moment)"
+Type "# Installing the project dependencies (takes a moment)"
 Enter
 Hide
 Type "npm install"
 Enter
-Sleep 30000ms
+Sleep 40000ms
 Show
 Sleep 400ms
 
@@ -66,7 +60,7 @@ Sleep 700ms
 Type "npm install -D vite-plugin-memory-leak-detector"
 Enter
 Hide
-Sleep 12000ms
+Sleep 18000ms
 Show
 Sleep 400ms
 
