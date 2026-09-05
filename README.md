@@ -5,6 +5,14 @@ A powerful, AST-based Vite plugin that detects potential memory leaks in your fr
 [![NPM Version](https://img.shields.io/npm/v/vite-plugin-memory-leak-detector)](https://npmjs.com/package/vite-plugin-memory-leak-detector)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
+![Vite Plugin Memory Leak Detector Demo](./demo.gif)
+
+*"Watch the plugin catch missing useEffect cleanups, unclosed WebSockets, and uncleared timers live during `vite build`"*
+
+- ⚡ **Build-Time Detection**: Real-time identification of leaks with precise line numbers and remediation suggestions.
+- 📊 **Rich Artifacts**: Automatic generation of HTML dashboards, SARIF annotations, and Markdown summaries.
+- 🛡️ **Baseline System**: Grandfathering legacy leaks so existing large projects can adopt the tool instantly without failing CI.
+
 ## Features
 
 - **Blazing Fast**: Uses the Rust-powered `oxc-parser` combined with standard ESTree traversal.
