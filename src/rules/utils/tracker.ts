@@ -64,12 +64,17 @@ export function extractIdentifiersFromPattern(pattern: any): string[] {
 }
 
 /**
- * Returns the declaration kind (`var`, `let`, or `const`) for a
- * `VariableDeclarator` by reading its parent `VariableDeclaration` node.
+ * Returns the declaration kind (`var`, `let`, `const`, `using`, or `await-using`)
+ * for a `VariableDeclarator` by reading its parent `VariableDeclaration` node.
  * Defaults to `let` for non-`VariableDeclaration` parents.
  */
-export function getDeclarationKind(parent: any): 'var' | 'let' | 'const' {
-  return parent && parent.type === 'VariableDeclaration' ? parent.kind : 'let';
+export function getDeclarationKind(parent: any): 'var' | 'let' | 'const' | 'using' | 'await-using' {
+  if (!parent || parent.type !== 'VariableDeclaration') return 'let';
+  const kind = parent.kind;
+  if (kind === 'using' || kind === 'await using') {
+    return kind === 'using' ? 'using' : 'await-using';
+  }
+  return kind as 'var' | 'let' | 'const';
 }
 
 export interface AllocationTarget {
@@ -125,10 +130,29 @@ export function getAllocationTarget(
   for (const curr of chain) {
     if (!curr || typeof curr !== 'object') continue;
 
-    // const id = setInterval(...)
-    if (curr.type === 'VariableDeclarator') {
-      return { name: getExpressionName(curr.id), isHandledExternally: false, isCollection: false };
+// const id = setInterval(...)
+  if (curr.type === 'VariableDeclarator') {
+    // Check if the VariableDeclarator's parent VariableDeclaration has kind "using" or "await using"
+    // Search through ancestors to find the enclosing VariableDeclaration
+    let declParent: any = null;
+    for (const ancestor of (ancestors ?? [])) {
+      if (ancestor.type === 'VariableDeclaration') {
+        declParent = ancestor;
+        break;
+      }
     }
+    // Also check if the current parent parameter is the VariableDeclaration
+    if (!declParent && parent && parent.type === 'VariableDeclaration') {
+      declParent = parent;
+    }
+    const declKind = declParent ? getDeclarationKind(declParent) : 'let';
+    const isUsing = declKind === 'using' || declKind === 'await-using';
+    return {
+      name: getExpressionName(curr.id),
+      isHandledExternally: isUsing,
+      isCollection: false,
+    };
+  }
 
     // this.id = setInterval(...)
     if (curr.type === 'AssignmentExpression') {

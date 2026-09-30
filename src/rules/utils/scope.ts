@@ -136,10 +136,10 @@ export class ScopeTracker {
   }
 
   /**
-   * Record a variable declaration in the current lexical environment.
-   * `var` declarations are hoisted to the nearest enclosing function scope.
-   */
-  declareVariable(name: string, kind: 'var' | 'let' | 'const' = 'let') {
+ * Record a variable declaration in the current lexical environment.
+ * `var` declarations are hoisted to the nearest enclosing function scope.
+ */
+declareVariable(name: string, kind: 'var' | 'let' | 'const' | 'using' | 'await-using' = 'let') {
     const scopeId = kind === 'var' ? this.nearestFunctionScopeId() : this.currentScopeId();
     let names = this.declaredVariables.get(scopeId);
     if (!names) {
@@ -147,6 +147,12 @@ export class ScopeTracker {
       this.declaredVariables.set(scopeId, names);
     }
     names.add(name);
+
+    // Resources declared with `using` or `await using` are implicitly
+    // handled by the runtime at block exit, so mark them as cleared.
+    if (kind === 'using' || kind === 'await-using') {
+      this.addClearance(name);
+    }
   }
 
   addAllocation(name: string) {
