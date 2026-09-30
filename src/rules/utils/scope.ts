@@ -96,16 +96,84 @@ export class ScopeTracker {
     return this.scopeStack[this.scopeStack.length - 1] ?? 0;
   }
 
-  enterConditional() {
+  private conditionalNode: any = null;
+
+  enterConditional(node?: any) {
     this.conditionalDepth++;
+    this.conditionalNode = node || null;
   }
 
   exitConditional() {
-    if (this.conditionalDepth > 0) this.conditionalDepth--;
+    this.conditionalDepth--;
+    this.conditionalNode = null;
   }
 
   isInConditionalBranch(): boolean {
     return this.conditionalDepth > 0;
+  }
+
+  /**
+   * Returns true if the stored conditional node directly guards the given name.
+   * Checks for: direct identifier match (if id), binary null check (if id !== null),
+   * and logical guard (if id || something / if id && something).
+   */
+  isSelfGuarded(name: string): boolean {
+    if (!this.conditionalNode) return false;
+
+    const node = this.conditionalNode;
+
+    // Direct identifier match: if (id)
+    if (node.type === 'Identifier' && node.name === name) return true;
+
+    // Binary check against null/undefined: if (id !== null) or if (id != null)
+    if (node.type === 'BinaryExpression') {
+      const leftName =
+        node.left.type === 'Identifier' ? node.left.name : null;
+      const rightIsNull =
+        node.right.type === 'Literal' && node.right.value === null;
+      const rightIsIdentifierNull =
+        node.right.type === 'Identifier' &&
+        node.right.name === 'null' &&
+        node.left.type === 'Literal' &&
+        node.left.value === null;
+
+      if (
+        (leftName === name && rightIsNull) ||
+        (rightIsIdentifierNull && leftName === name)
+      )
+        return true;
+    }
+
+    // Logical guard: if (id || something) or if (id && something)
+    if (node.type === 'LogicalExpression') {
+      const leftIsName =
+        node.left.type === 'Identifier' && node.left.name === name;
+      const rightIsName =
+        node.right.type === 'Identifier' && node.right.name === name;
+      if (leftIsName || rightIsName) return true;
+    }
+
+    // Optional chain guard: if (id?.something) — the inner identifier matches
+    if (node.type === 'ChainExpression') {
+      const inner = node.expression;
+      if (
+        inner.type === 'Identifier' &&
+        inner.name === name
+      )
+        return true;
+      if (
+        inner.type === 'BinaryExpression' ||
+        inner.type === 'LogicalExpression'
+      ) {
+        const leftName =
+          inner.left.type === 'Identifier' ? inner.left.name : null;
+        const rightName =
+          inner.right.type === 'Identifier' ? inner.right.name : null;
+        if (leftName === name || rightName === name) return true;
+      }
+    }
+
+    return false;
   }
 
   /**
@@ -160,10 +228,11 @@ declareVariable(name: string, kind: 'var' | 'let' | 'const' | 'using' | 'await-u
   }
 
   addClearance(name: string) {
+    const isSelf = this.isSelfGuarded(name);
     this.clearances.push({
       name,
       scopeId: this.currentScopeId(),
-      conditional: this.conditionalDepth > 0,
+      conditional: this.conditionalDepth > 0 && !isSelf,
     });
   }
 
@@ -405,12 +474,12 @@ export function attachScopeListeners(tracker: ScopeTracker, visitor: RuleVisitor
   }
 
   for (const type of CONDITIONAL_NODE_TYPES) {
-    visitor[type] = () => tracker.enterConditional();
+    visitor[type] = (node: any) => tracker.enterConditional(node);
     visitor[`${type}:exit`] = () => tracker.exitConditional();
   }
 
   visitor.LogicalExpression = (node: any) => {
-    if (node.operator === '&&' || node.operator === '||') tracker.enterConditional();
+    if (node.operator === '&&' || node.operator === '||') tracker.enterConditional(node);
   };
   visitor['LogicalExpression:exit'] = (node: any) => {
     if (node.operator === '&&' || node.operator === '||') tracker.exitConditional();

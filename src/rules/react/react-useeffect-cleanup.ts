@@ -25,9 +25,17 @@ const CLEARANCE_FUNCTIONS = new Set(['clearInterval', 'clearTimeout', 'cancelAni
 const CLEARANCE_METHODS = new Set(['close', 'abort', 'disconnect', 'unsubscribe', 'off']);
 
 /**
+ * Call names that are logging utilities and should NOT be treated as valid
+ * external opaque teardown handlers. A cleanup returning only console.* calls
+ * must still trigger leak reports for uncleared resources.
+ */
+const LOGGING_UTILITIES = new Set(['console', 'debug']);
+
+/**
  * Call names that are understood by this rule — either leaky resource
  * allocations or known clearance calls/methods. Anything else inside a cleanup
- * function is treated as an opaque, externally-managed teardown.
+ * function is treated as an opaque, externally-managed teardown, except for
+ * logging utilities which are explicitly not opaque suppressors.
  */
 const KNOWN_CALL_NAMES = new Set([
   ...LEAKY_CALLS,
@@ -220,8 +228,14 @@ export const reactUseEffectCleanupRule: RuleDefinition = {
       if (!effect) return;
 
       // Opaque external teardown inside a returned cleanup function suppresses
-      // "resource not cleared" warnings.
-      if (name && !KNOWN_CALL_NAMES.has(name) && isInsideCleanupScope(effect)) {
+      // "resource not cleared" warnings — but only for legitimate external
+      // teardown calls, not for logging utilities like console.log or debug().
+      if (
+        name &&
+        !KNOWN_CALL_NAMES.has(name) &&
+        !LOGGING_UTILITIES.has(name) &&
+        isInsideCleanupScope(effect)
+      ) {
         effect.hasOpaqueCleanupCall = true;
       }
 
