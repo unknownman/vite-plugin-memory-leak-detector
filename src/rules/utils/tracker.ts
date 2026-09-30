@@ -133,11 +133,14 @@ export function getAllocationTarget(
 // const id = setInterval(...)
   if (curr.type === 'VariableDeclarator') {
     // Check if the VariableDeclarator's parent VariableDeclaration has kind "using" or "await using"
-    // Search through ancestors to find the enclosing VariableDeclaration
+    // Search through ancestors in REVERSE order to find the CLOSEST enclosing VariableDeclaration,
+    // rather than the outermost/root declaration. Iterating from the innermost scope upwards
+    // ensures we match the immediate parent declaration.
     let declParent: any = null;
-    for (const ancestor of (ancestors ?? [])) {
-      if (ancestor.type === 'VariableDeclaration') {
-        declParent = ancestor;
+    const ancestorList = ancestors ?? [];
+    for (let i = ancestorList.length - 1; i >= 0; i--) {
+      if (ancestorList[i].type === 'VariableDeclaration') {
+        declParent = ancestorList[i];
         break;
       }
     }

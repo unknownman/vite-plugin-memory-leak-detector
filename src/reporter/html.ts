@@ -1,6 +1,15 @@
 import path from 'node:path';
 import type { Diagnostic } from '../types/diagnostic.js';
 
+function escapeHtml(str: string): string {
+  return str
+    .replace(/&/g, '&')
+    .replace(/</g, '<')
+    .replace(/>/g, '>')
+    .replace(/"/g, '"')
+    .replace(/'/g, '&#039;');
+}
+
 export function generateHtmlReport(diagnostics: Diagnostic[]): string {
   const errors = diagnostics.filter((d) => d.severity === 'error').length;
   const warnings = diagnostics.filter((d) => d.severity === 'warn').length;
@@ -10,23 +19,23 @@ export function generateHtmlReport(diagnostics: Diagnostic[]): string {
 
   const rowHtml = diagnostics
     .map((d) => {
-      const relativeFile = path.relative(cwd, d.file).replace(/\\/g, '/');
+      const relativeFile = escapeHtml(path.relative(cwd, d.file).replace(/\\/g, '/'));
       const vscodeLink = `vscode://file/${encodeURIComponent(d.file)}:${d.line}:${d.column}`;
 
       return `
-      <tr class="issue-row severity-${d.severity}" data-severity="${d.severity}" data-rule="${d.ruleId}">
+      <tr class="issue-row severity-${d.severity}" data-severity="${d.severity}" data-rule="${escapeHtml(d.ruleId)}">
         <td class="px-4 py-3">
           <span class="badge badge-${d.severity}">${d.severity.toUpperCase()}</span>
         </td>
-        <td class="px-4 py-3 font-mono text-sm text-gray-700">${d.ruleId}</td>
+        <td class="px-4 py-3 font-mono text-sm text-gray-700">${escapeHtml(d.ruleId)}</td>
         <td class="px-4 py-3 font-mono text-sm">
           <a href="${vscodeLink}" class="file-link" title="Open in VS Code">
             ${relativeFile}:${d.line}:${d.column}
           </a>
         </td>
         <td class="px-4 py-3">
-          <div class="font-medium text-gray-900">${d.message}</div>
-          ${d.suggestion ? `<div class="suggestion-box">💡 <strong>Suggestion:</strong> ${d.suggestion}</div>` : ''}
+          <div class="font-medium text-gray-900">${escapeHtml(d.message)}</div>
+          ${d.suggestion ? `<div class="suggestion-box">💡 <strong>Suggestion:</strong> ${escapeHtml(d.suggestion)}</div>` : ''}
         </td>
       </tr>
     `;

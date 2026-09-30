@@ -7,11 +7,11 @@ export function resolvePluginConfig(userOptions: PluginOptions = {}): ResolvedPl
 
   const mode = userOptions.mode ?? DEFAULT_CONFIG.mode;
 
-  // Resolve thresholds based on mode defaults
+  // Resolve thresholds based on user options unified with DEFAULT_CONFIG
   const thresholds = {
-    maxWarnings: userOptions.thresholds?.maxWarnings ?? Number.POSITIVE_INFINITY,
-    maxErrors: userOptions.thresholds?.maxErrors ?? (mode === 'error' ? 0 : Number.POSITIVE_INFINITY),
-    maxTotal: userOptions.thresholds?.maxTotal ?? Number.POSITIVE_INFINITY,
+    maxWarnings: userOptions.thresholds?.maxWarnings ?? DEFAULT_CONFIG.thresholds.maxWarnings,
+    maxErrors: userOptions.thresholds?.maxErrors ?? DEFAULT_CONFIG.thresholds.maxErrors,
+    maxTotal: userOptions.thresholds?.maxTotal ?? DEFAULT_CONFIG.thresholds.maxTotal,
   };
 
   // Resolve baseline

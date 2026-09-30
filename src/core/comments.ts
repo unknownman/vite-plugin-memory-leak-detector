@@ -57,7 +57,7 @@ export class CommentDirectivesHandler {
 
     // Matches single-line directives AND multi-line block comment directives globally
     const pattern = new RegExp(
-      `//\\s*${this.prefix}-(ignore-next-line|ignore-line|ignore)(.*)$|/\\*\\s*${this.prefix}-(ignore-start|ignore-end)(?:\\s+([\\s\\S]*?))?\\s*\\*/`,
+      `//\\s*${this.prefix}-(ignore-next-line|ignore-line|ignore-file|ignore-start|ignore-end|ignore)(?=\\s|$)(.*)$|/\\*\\s*${this.prefix}-(ignore-start|ignore-end)(?:\\s+([\\s\\S]*?))?\\s*\\*/`,
       'gm'
     );
 
@@ -65,8 +65,8 @@ export class CommentDirectivesHandler {
       const matchIndex = match.index ?? 0;
       const lineNum = getLineNumber(matchIndex);
 
+      // Single-line comment directive: match[1] = action, match[2] = rules
       if (match[1]) {
-        // Single-line comment directive
         const action = match[1];
         const rawRules = match[2]?.trim() || '';
         const rules = rawRules
@@ -82,11 +82,13 @@ export class CommentDirectivesHandler {
           });
         } else if (action === 'ignore-line') {
           directives.push({ type: 'ignore-line', rules, line: lineNum });
-        } else if (action === 'ignore') {
+        } else {
+          // action is 'ignore' or 'ignore-file' -> map to ignore-file
           directives.push({ type: 'ignore-file', rules, line: lineNum });
         }
-      } else if (match[3]) {
-        // Block comment directive (single or multi-line)
+      }
+      // Block comment directive: match[3] = action, match[4] = rules
+      else if (match[3]) {
         const action = match[3];
         const rawRules = match[4]?.replace(/^\s*\*+/gm, '').trim() || '';
         const rules = rawRules

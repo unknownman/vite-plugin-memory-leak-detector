@@ -5,7 +5,7 @@ export const DEFAULT_CONFIG: ResolvedPluginConfig = {
   frameworks: 'auto',
   thresholds: {
     maxWarnings: Number.POSITIVE_INFINITY,
-    maxErrors: 0,
+    maxErrors: Number.POSITIVE_INFINITY,
     maxTotal: Number.POSITIVE_INFINITY,
   },
   include: /\.[jt]sx?$|\.vue$|\.svelte$/,
