@@ -27,6 +27,12 @@ export interface Diagnostic {
   endLine?: number;
   endColumn?: number;
   codeFrame?: CodeFrame;
+  /**
+   * Whitespace-normalized source line the diagnostic points at. Part of the
+   * baseline fingerprint, which lets two leaks of the same variable in one
+   * file stay distinct while remaining insensitive to line numbers.
+   */
+  snippet?: string;
   /** Unique deterministic fingerprint for baseline tracking */
   fingerprint?: string;
 }

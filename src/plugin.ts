@@ -1,5 +1,5 @@
 import fs from 'node:fs';
-import type { Plugin, ViteDevServer } from 'vite';
+import type { Plugin, ResolvedConfig, ViteDevServer } from 'vite';
 import { createFilter } from '@rollup/pluginutils';
 import pc from 'picocolors';
 
@@ -11,7 +11,6 @@ import { extractSource } from './core/extractors/index.js';
 import { builtinRules } from './rules/index.js';
 import { dispatchReports } from './reporter/index.js';
 import { consoleReporter } from './reporter/console.js';
-import { BaselineManager } from './core/baseline.js';
 
 export function memoryLeakDetectorPlugin(options: PluginOptions = {}): Plugin {
   const config = resolvePluginConfig(options);
@@ -28,6 +27,17 @@ export function memoryLeakDetectorPlugin(options: PluginOptions = {}): Plugin {
   // current state, whether or not Vite re-ran our transform hook.
   const diagnosticMap = new Map<string, Diagnostic[]>();
   let isBuild = false;
+
+  // Vite's own logger, so `--logLevel` and `clearScreen` are respected. Falls
+  // back to the console until `configResolved` supplies the real one.
+  let viteLogger: ResolvedConfig['logger'] | undefined;
+  const logInfo = (msg: string) => (viteLogger ? viteLogger.info(msg) : console.log(msg));
+  const logWarn = (msg: string) => (viteLogger ? viteLogger.warn(msg) : console.warn(msg));
+  const logError = (msg: string) => (viteLogger ? viteLogger.error(msg) : console.error(msg));
+
+  // Project root from the resolved Vite config; `process.cwd()` is only a
+  // fallback for the window before `configResolved` runs.
+  let root = process.cwd();
 
   const hasTerminalReport = () =>
     config.mode !== 'report-only' &&
@@ -67,7 +77,7 @@ export function memoryLeakDetectorPlugin(options: PluginOptions = {}): Plugin {
     if (stateKey === printedSummaryKey) return;
     printedSummaryKey = stateKey;
 
-    consoleReporter(allDiagnostics, undefined, { verbose: false });
+    consoleReporter(allDiagnostics, undefined, { verbose: false, root, write: logInfo });
   }
 
   /**
@@ -105,7 +115,7 @@ export function memoryLeakDetectorPlugin(options: PluginOptions = {}): Plugin {
     diagnosticMap.set(normalizedId, diagnostics);
 
     if (!hasTerminalReport()) return;
-    consoleReporter(diagnostics, code);
+    consoleReporter(diagnostics, code, { root, write: logInfo });
   }
 
   return {
@@ -113,9 +123,14 @@ export function memoryLeakDetectorPlugin(options: PluginOptions = {}): Plugin {
     // 'pre' ensures we get the raw source code before transpilers like Babel or SWC mangle it
     enforce: 'pre',
 
-    // 1. Determine operating mode (dev vs build)
+    // 1. Determine operating mode (dev vs build) and project root
     configResolved(viteConfig) {
       isBuild = viteConfig.command === 'build';
+      viteLogger = viteConfig.logger;
+      root = viteConfig.root ?? process.cwd();
+      // Fingerprints and the baseline path must be relative to the Vite project
+      // root, not to whatever directory the CLI was launched from.
+      engine.setRoot(root);
     },
 
     // 2. Dev-server lifecycle: keep the cache tidy, refresh totals when a batch
@@ -207,9 +222,9 @@ export function memoryLeakDetectorPlugin(options: PluginOptions = {}): Plugin {
 
       // Write baseline if requested
       if (config.baseline.enabled && config.baseline.update) {
-        const baselineManager = new BaselineManager(config.baseline.path);
-        baselineManager.updateBaseline(allDiagnostics);
-        console.log(
+        const baselineManager = engine.getBaselineManager();
+        baselineManager?.updateBaseline(allDiagnostics);
+        logInfo(
           pc.green(
             `\n[vite-plugin-memory-leak-detector] Recorded ${allDiagnostics.length} leak(s) to ${config.baseline.path}`
           )
@@ -217,10 +232,10 @@ export function memoryLeakDetectorPlugin(options: PluginOptions = {}): Plugin {
       }
 
       // Dispatch structured reports (HTML, SARIF, Markdown, JSON, stylish)
-      dispatchReports(allDiagnostics, config.reports, config.outputDir);
+      dispatchReports(allDiagnostics, config.reports, config.outputDir, undefined, root, logInfo);
 
       if (config.mode === 'report-only') {
-        console.log(
+        logInfo(
           pc.blue(
             `\n[vite-plugin-memory-leak-detector] Analyzed ${diagnosticMap.size} files. Report-only mode active, thresholds ignored.`
           )
@@ -242,9 +257,9 @@ export function memoryLeakDetectorPlugin(options: PluginOptions = {}): Plugin {
           '',
         ].join('\n');
 
-        console.log(summary);
+        logInfo(summary);
       } else {
-        console.log(pc.green(`\n[vite-plugin-memory-leak-detector] Clean run! No memory leaks detected. 🎉\n`));
+        logInfo(pc.green(`\n[vite-plugin-memory-leak-detector] Clean run! No memory leaks detected. 🎉\n`));
       }
 
       // Evaluate thresholds

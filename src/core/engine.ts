@@ -4,7 +4,7 @@ import type { RuleContext, RuleDefinition, ExtractionResult, RuleVisitor } from 
 import type { Severity, ResolvedPluginConfig } from '../types/config.js';
 import { parseCode } from './parser.js';
 import { CommentDirectivesHandler } from './comments.js';
-import { BaselineManager, generateFingerprint } from './baseline.js';
+import { BaselineManager, generateFingerprint, normalizeSnippet } from './baseline.js';
 import { IgnoreManager } from './ignore.js';
 
 export class LeakDetectorEngine {
@@ -12,7 +12,14 @@ export class LeakDetectorEngine {
   private commentHandler: CommentDirectivesHandler;
   private ignoreManager: IgnoreManager;
   private baselineManager?: BaselineManager;
+  private baselineManagerRoot?: string;
   private rules: RuleDefinition[];
+  /**
+   * Base directory for repo-relative paths in fingerprints and the baseline
+   * file. Set from the resolved Vite config so results do not depend on the
+   * directory the CLI happened to run in.
+   */
+  private root: string = process.cwd();
 
   constructor(config: ResolvedPluginConfig) {
     this.config = config;
@@ -22,10 +29,35 @@ export class LeakDetectorEngine {
     );
     this.ignoreManager = new IgnoreManager(config.ignores);
 
-    if (config.baseline.enabled) {
-      this.baselineManager = new BaselineManager(config.baseline.path);
-    }
     this.rules = config.customRules;
+  }
+
+  /**
+   * Points the engine at the Vite project root, so fingerprints and the
+   * baseline file resolve against the project rather than the CLI's cwd.
+   * Called from `configResolved`, which runs after the constructor.
+   */
+  public setRoot(root: string): void {
+    if (root) this.root = root;
+  }
+
+  public getRoot(): string {
+    return this.root;
+  }
+
+  /**
+   * Lazily builds the baseline manager for the current root. Created on first
+   * use rather than in the constructor so that a `setRoot()` call from
+   * `configResolved` still results in exactly one baseline file read (and at
+   * most one legacy-format warning).
+   */
+  public getBaselineManager(): BaselineManager | undefined {
+    if (!this.config.baseline.enabled) return undefined;
+    if (!this.baselineManager || this.baselineManagerRoot !== this.root) {
+      this.baselineManager = new BaselineManager(this.config.baseline.path, this.root);
+      this.baselineManagerRoot = this.root;
+    }
+    return this.baselineManager;
   }
 
   public analyze(file: string, code: string, extraction?: ExtractionResult): Diagnostic[] {
@@ -53,6 +85,13 @@ export class LeakDetectorEngine {
     const offset = extraction
       ? { lineOffset: extraction.lineOffset, columnOffset: extraction.columnOffset }
       : { lineOffset: 0, columnOffset: 0 };
+
+    // Fingerprints read the *original* file text (not the extracted script) so
+    // the snippet for an SFC diagnostic is the line a developer actually sees.
+    const originalLines = code.split(/\r?\n/);
+    // Counts how many diagnostics have shared a (rule, file, snippet) so far, so
+    // two identical lines in one file stay distinguishable.
+    const occurrenceCounters = new Map<string, number>();
 
     // Allowlist closure
     const isAllowlisted = (name: string, type: 'function' | 'method'): boolean => {
@@ -92,11 +131,20 @@ export class LeakDetectorEngine {
           endColumn: diag.endColumn,
         };
 
-        diagnostic.fingerprint = generateFingerprint(diagnostic);
+        // Snippet + occurrence index make the fingerprint specific to *what*
+        // leaked rather than just which rule and message fired. Neither depends
+        // on the line number, so inserting code above a leak keeps it baselined.
+        diagnostic.snippet = normalizeSnippet(originalLines[actualLine - 1] ?? '');
+        const occurrenceKey = `${diagnostic.ruleId}|${file}|${diagnostic.snippet}`;
+        const occurrenceIndex = occurrenceCounters.get(occurrenceKey) ?? 0;
+        occurrenceCounters.set(occurrenceKey, occurrenceIndex + 1);
+
+        diagnostic.fingerprint = generateFingerprint(diagnostic, this.root, occurrenceIndex);
 
         // 4. BASELINE SUPPRESSION
-        if (this.baselineManager) {
-          if (!this.config.baseline.update && this.baselineManager.isKnown(diagnostic)) {
+        const baselineManager = this.getBaselineManager();
+        if (baselineManager) {
+          if (!this.config.baseline.update && baselineManager.isKnown(diagnostic)) {
             // It's a legacy issue and we are NOT in update mode. Skip reporting it.
             return;
           }

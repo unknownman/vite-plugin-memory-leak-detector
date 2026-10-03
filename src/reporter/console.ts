@@ -36,6 +36,13 @@ function formatCodeframe(code: string, diag: Diagnostic): string {
 
 export interface ConsoleReporterOptions {
   verbose?: boolean;
+  /** Base directory for the repo-relative file paths shown in the header. */
+  root?: string;
+  /**
+   * Where formatted lines go. Defaults to `console.log`; the Vite plugin passes
+   * its logger so `--logLevel` and `clearScreen` are respected.
+   */
+  write?: (line: string) => void;
 }
 
 /**
@@ -52,26 +59,27 @@ export function consoleReporter(diagnostics: Diagnostic[], sourceCode?: string, 
     {} as Record<string, Diagnostic[]>,
   );
 
-  const cwd = process.cwd();
+  const cwd = options.root ?? process.cwd();
+  const write = options.write ?? ((line: string) => console.log(line));
 
   for (const [file, diags] of Object.entries(grouped)) {
     const relFile = path.relative(cwd, file);
-    console.log(`\n${pc.underline(pc.cyan(relFile))}`);
+    write(`\n${pc.underline(pc.cyan(relFile))}`);
 
     for (const diag of diags) {
       const color = SEVERITY_COLORS[diag.severity];
       const severityLabel = color(diag.severity.padEnd(5));
       const pos = pc.dim(`${diag.line}:${diag.column}`.padEnd(8));
 
-      console.log(`  ${pos} ${severityLabel} ${diag.message} ${pc.dim(diag.ruleId)}`);
+      write(`  ${pos} ${severityLabel} ${diag.message} ${pc.dim(diag.ruleId)}`);
 
       if (diag.suggestion) {
-        console.log(`            ${pc.green('💡')} ${pc.italic(diag.suggestion)}`);
+        write(`            ${pc.green('💡')} ${pc.italic(diag.suggestion)}`);
       }
 
       if (sourceCode !== undefined && options.verbose !== false) {
         const frame = formatCodeframe(sourceCode, diag);
-        if (frame) console.log(`\n${frame}\n`);
+        if (frame) write(`\n${frame}\n`);
       }
     }
   }
@@ -84,7 +92,7 @@ export function consoleReporter(diagnostics: Diagnostic[], sourceCode?: string, 
   if (warnCount > 0) parts.push(pc.yellow(`${warnCount} warnings`));
 
   if (parts.length > 0) {
-    console.log(`\n${pc.bold(`✖ ${parts.join(', ')}`)}`);
+    write(`\n${pc.bold(`✖ ${parts.join(', ')}`)}`);
   }
 }
 

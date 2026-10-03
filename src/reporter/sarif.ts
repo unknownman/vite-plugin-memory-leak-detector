@@ -1,8 +1,8 @@
 import path from 'node:path';
 import type { Diagnostic } from '../types/diagnostic.js';
 
-export function generateSarifReport(diagnostics: Diagnostic[]): string {
-  const cwd = process.cwd();
+export function generateSarifReport(diagnostics: Diagnostic[], root: string = process.cwd()): string {
+  const cwd = root;
 
   // Extract unique rules for the SARIF definitions
   const uniqueRules = Array.from(new Set(diagnostics.map((d) => d.ruleId))).map((id) => ({

@@ -1,7 +1,7 @@
 import path from 'node:path';
 import type { Diagnostic } from '../types/diagnostic.js';
 
-export function generateMarkdownReport(diagnostics: Diagnostic[]): string {
+export function generateMarkdownReport(diagnostics: Diagnostic[], root: string = process.cwd()): string {
   const errors = diagnostics.filter((d) => d.severity === 'error').length;
   const warnings = diagnostics.filter((d) => d.severity === 'warn').length;
 
@@ -18,7 +18,7 @@ export function generateMarkdownReport(diagnostics: Diagnostic[]): string {
 
   for (const d of diagnostics) {
     const icon = d.severity === 'error' ? '🔴' : '🟡';
-    const relFile = path.relative(process.cwd(), d.file).replace(/\\/g, '/');
+    const relFile = path.relative(root, d.file).replace(/\\/g, '/');
 
     // Sanitize message for markdown table
     const safeMsg = d.message.replace(/\|/g, '&#124;').replace(/\n/g, ' ');

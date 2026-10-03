@@ -10,12 +10,12 @@ function escapeHtml(str: string): string {
     .replace(/'/g, '&#039;');
 }
 
-export function generateHtmlReport(diagnostics: Diagnostic[]): string {
+export function generateHtmlReport(diagnostics: Diagnostic[], root: string = process.cwd()): string {
   const errors = diagnostics.filter((d) => d.severity === 'error').length;
   const warnings = diagnostics.filter((d) => d.severity === 'warn').length;
   const total = diagnostics.length;
 
-  const cwd = process.cwd();
+  const cwd = root;
 
   const rowHtml = diagnostics
     .map((d) => {
