@@ -25,11 +25,26 @@ const CLEARANCE_FUNCTIONS = new Set(['clearInterval', 'clearTimeout', 'cancelAni
 const CLEARANCE_METHODS = new Set(['close', 'abort', 'disconnect', 'unsubscribe', 'off']);
 
 /**
- * Call names that are logging utilities and should NOT be treated as valid
- * external opaque teardown handlers. A cleanup returning only console.* calls
- * must still trigger leak reports for uncleared resources.
+ * Method names that are logging utilities and should NOT be treated as valid
+ * external opaque teardown handlers. A cleanup returning only console/debug
+ * calls must still trigger leak reports for uncleared resources.
+ *
+ * Matching is on the callee's *property* name, since `getCalleeName` resolves
+ * `console.log` to `log`.
  */
-const LOGGING_UTILITIES = new Set(['console', 'debug']);
+const LOGGING_UTILITIES = new Set([
+  'console',
+  'log',
+  'info',
+  'warn',
+  'error',
+  'trace',
+  'table',
+  'time',
+  'timeEnd',
+  'debug',
+  'dir',
+]);
 
 /**
  * Call names that are understood by this rule — either leaky resource

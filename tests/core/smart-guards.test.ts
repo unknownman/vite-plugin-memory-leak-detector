@@ -1,112 +1,126 @@
 import { describe, it, expect } from 'vitest';
 import { runRule } from '../utils.js';
 import { noUnclearedTimersRule } from '../../src/rules/generic/no-uncleared-timers.js';
-import { noMissingAbortControllerRule } from '../../src/rules/generic/no-missing-abort-controller.js';
+import { reactUseEffectCleanupRule } from '../../src/rules/react/react-useeffect-cleanup.js';
 
-// Helper: run a rule and return diagnostics
-function ruleTest(code: string, rule: any, expectations: { count: number; message?: string }[] = []): void {
-  const diagnostics = runRule(code, rule);
-  expect(diagnostics).toHaveLength(expectations[0]?.count ?? diagnostics.length);
-  for (const exp of expectations) {
-    if (exp.message) {
-      const matching = diagnostics.filter((d: any) => d.message.includes(exp.message));
-      expect(matching).toHaveLength(1);
-    }
-  }
-}
-
+/**
+ * A clearance guarded by `if (id)` is safe: the body only runs when the
+ * resource actually exists, so the timer is provably released.
+ */
 describe('Smart conditional guards - scope.isSelfGuarded', () => {
-  it('if (id) clear(id) - direct identifier guard', () => {
-    // Test the core logic: a clearance directly identifying the resource
-    // is NOT conditional even inside an if block
+  it('treats `if (id)` as an unconditional (self) guard', () => {
     const code = `
-      if (true) {
-        const id = setInterval(() => {}, 1000);
-        clearInterval(id);
-      }
+      let id = setInterval(tick, 1000);
+      if (id) { clearInterval(id); }
     `;
-    // The rule should not flag this as a conditional leak
-    // Since we can't easily test isSelfGuarded directly through the rule,
-    // we test the no-uncleared-timers behavior
-    const diagnostics = runRule(noUnclearedTimersRule, code);
-    // setInterval assigned to id, cleared inside the same block - should be 0
-    expect(diagnostics).toHaveLength(0);
+    expect(runRule(noUnclearedTimersRule, code)).toHaveLength(0);
   });
 
-  it('if (unrelated) clear(id) - unrelated guard IS conditional', () => {
+  it('treats `if (id !== null)` as a self guard', () => {
     const code = `
-      if (true) {
-        const id = setInterval(() => {}, 1000);
-        clearInterval(id);
-      }
-      if (unrelated) {
-        clearInterval(id);
-      }
+      let id = setInterval(tick, 1000);
+      if (id !== null) { clearInterval(id); }
     `;
-    // The second clear is in a different scope/context
+    expect(runRule(noUnclearedTimersRule, code)).toHaveLength(0);
+  });
+
+  it('treats `if (id != undefined)` as a self guard', () => {
+    const code = `
+      let id = setInterval(tick, 1000);
+      if (id != undefined) { clearInterval(id); }
+    `;
+    expect(runRule(noUnclearedTimersRule, code)).toHaveLength(0);
+  });
+
+  it('treats a logical `&&` guard as a self guard', () => {
+    const code = `
+      let id = setInterval(tick, 1000);
+      let ready = true;
+      if (id && ready) { clearInterval(id); }
+    `;
+    expect(runRule(noUnclearedTimersRule, code)).toHaveLength(0);
+  });
+
+  it('treats an optional-chain guard as a self guard', () => {
+    const code = `
+      let id = setInterval(tick, 1000);
+      let ready = true;
+      if (id?.ready) { clearInterval(id); }
+    `;
+    expect(runRule(noUnclearedTimersRule, code)).toHaveLength(0);
+  });
+
+  it('reports a conditional leak when the guard tests an unrelated name', () => {
+    const code = `
+      let id = setInterval(tick, 1000);
+      let unrelated = true;
+      if (unrelated) { clearInterval(id); }
+    `;
     const diagnostics = runRule(noUnclearedTimersRule, code);
-    // First clear is unconditional, but the second is unreachable/conditional
-    expect(diagnostics).toHaveLength(0); // first clear handles it
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0].message).toContain('only cleared conditionally');
+  });
+
+  it('reports a conditional leak when the guard is a bare truthy literal', () => {
+    const code = `
+      let id = setInterval(tick, 1000);
+      if (true) { clearInterval(id); }
+    `;
+    expect(runRule(noUnclearedTimersRule, code)).toHaveLength(1);
+  });
+
+  it('accepts an unguarded clearance', () => {
+    const code = `
+      let id = setInterval(tick, 1000);
+      clearInterval(id);
+    `;
+    expect(runRule(noUnclearedTimersRule, code)).toHaveLength(0);
   });
 });
 
 describe('Logging utility cleanup suppression', () => {
-  it('console.log(id) inside cleanup does NOT suppress leak warning', () => {
-    const code = `
-      useEffect(() => {
-        const id = setInterval(tick, 1000);
-        return () => console.log('timer stopped', id);
-      }, []);
-    `;
-    // This tests the react-useeffect-cleanup rule
-    // Unfortunately parseCode doesn't handle useEffect well in test utils
-    // Skip this test for now - the logic is verified via the rule source
-    expect(true).toBe(true);
+  const effectWithCleanupBody = (body: string) => `
+    useEffect(() => {
+      const id = setInterval(tick, 1000);
+      return () => ${body};
+    }, []);
+  `;
+
+  it.each([
+    ['console.log', `console.log('timer stopped', id)`],
+    ['console.warn', `console.warn('timer stopped', id)`],
+    ['console.error', `console.error('timer stopped', id)`],
+    ['console.info', `console.info('timer stopped', id)`],
+    ['console.debug', `console.debug('timer stopped', id)`],
+  ])('%s inside cleanup does not suppress the leak warning', (_name, body) => {
+    const diagnostics = runRule(reactUseEffectCleanupRule, effectWithCleanupBody(body));
+    expect(diagnostics.length).toBeGreaterThan(0);
+    expect(diagnostics.some((d) => d.message.includes('id'))).toBe(true);
   });
 
-  it('console.warn(id) inside cleanup does NOT suppress leak warning', () => {
-    expect(true).toBe(true);
-  });
-
-  it('console.error(id) inside cleanup does NOT suppress leak warning', () => {
-    expect(true).toBe(true);
-  });
-
-  it('multiple logging calls in cleanup still trigger leak report', () => {
-    expect(true).toBe(true);
-  });
-
-  it('legitimate external teardown still suppresses warning', () => {
-    expect(true).toBe(true);
-  });
-
-  it('no cleanup at all still reported', () => {
+  it('reports when there is no cleanup at all', () => {
     const code = `
       useEffect(() => {
         const id = setInterval(tick, 1000);
       }, []);
     `;
-    // Can't easily test without useEffect parser support
-    expect(true).toBe(true);
-  });
-});
-
-describe('Conditional guard self-evaluation', () => {
-  it('sets up guard evaluation structure', () => {
-    // Verify the test infrastructure works
-    const code = `
-      const x = 1;
-    `;
-    const diagnostics = runRule(noUnclearedTimersRule, code);
-    expect(diagnostics).toHaveLength(0);
+    expect(runRule(reactUseEffectCleanupRule, code).length).toBeGreaterThan(0);
   });
 
-  it('complex conditional patterns are parseable', () => {
+  it('does not report a genuinely cleaned-up effect', () => {
     const code = `
-      if (a) { doSomething(); }
-      if (b && c) { doOther(); }
+      useEffect(() => {
+        const id = setInterval(tick, 1000);
+        const handler = () => tick();
+        window.addEventListener('resize', handler);
+        return () => { clearInterval(id); window.removeEventListener('resize', handler); };
+      }, []);
     `;
-    const diagnostics = runRule(noUnclearedTimersRule, code);
-    expect(diagnostics).toHaveLength(0);
+    expect(runRule(reactUseEffectCleanupRule, code)).toHaveLength(0);
+  });
+
+  it('still honours a real external teardown as an opaque suppressor', () => {
+    const code = effectWithCleanupBody('registry.teardown(id)');
+    expect(runRule(reactUseEffectCleanupRule, code)).toHaveLength(0);
   });
 });

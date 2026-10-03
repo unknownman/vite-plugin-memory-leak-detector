@@ -13,7 +13,7 @@ interface RecordedClearance {
   conditional: boolean;
 }
 
-export type ScopeKind = 'function' | 'block';
+export type ScopeKind = 'function' | 'block' | 'class';
 
 /**
  * Function/method scope tags that are accepted as "teardown" contexts. A
@@ -37,17 +37,58 @@ export const TEARDOWN_SCOPE_TAGS = new Set([
 ]);
 
 /**
+ * Node types that open a lexical scope boundary. `block` is used for block
+ * statements (and loop/switch bodies), `function` for function, method and
+ * arrow bodies, and `class` for class bodies.
+ */
+const BLOCK_SCOPE_NODE_TYPES = ['BlockStatement', 'ForStatement', 'ForInStatement', 'ForOfStatement', 'SwitchStatement'];
+
+const FUNCTION_SCOPE_NODE_TYPES = ['FunctionDeclaration', 'FunctionExpression', 'ArrowFunctionExpression'];
+
+const CLASS_SCOPE_NODE_TYPES = ['ClassDeclaration', 'ClassExpression'];
+
+/**
+ * Conditional constructs that should mark any clearance inside them as
+ * "conditional" (a guard that may not execute).
+ */
+const CONDITIONAL_NODE_TYPES = ['IfStatement', 'SwitchCase', 'ConditionalExpression'];
+
+/**
+ * Conditional constructs whose guard expression lives on `.test`. `SwitchCase`
+ * is deliberately absent: it has no guard expression of its own.
+ */
+const GUARDED_CONDITION_TYPES = new Set([
+  'IfStatement',
+  'ConditionalExpression',
+  'WhileStatement',
+  'DoWhileStatement',
+]);
+
+/**
+ * Member-expression names rooted at `this` denote state that belongs to a
+ * single class instance, so they are only resolvable inside the class scope
+ * that owns them.
+ */
+function isClassInstanceMemberName(name: string): boolean {
+  return name.startsWith('this.') || name.startsWith('this[');
+}
+
+/**
  * Lexical-environment-aware tracker for allocation/clearance pairs.
  *
- * Every scope boundary (Program root, function entry/body, block statement)
- * receives a unique scope ID with a parent link. Declarations (`let`, `const`,
- * `var`) are recorded against the scope that lexically contains them, so the
- * same name declared in different scopes resolves to distinct bindings.
+ * Every scope boundary (Program root, function entry/body, block statement,
+ * class body) receives a unique scope ID with a parent link. Declarations
+ * (`let`, `const`, `var`) are recorded against the scope that lexically
+ * contains them, so the same name declared in different scopes resolves to
+ * distinct bindings.
  *
  * A clearance is valid only when the cleared name lexically resolves to the
  * exact same declaration scope as the allocation. This prevents false
  * negatives where two sibling functions each declare a local variable with
  * the same name but only one clears it.
+ *
+ * Class instance state (`this.*`) additionally respects class boundaries: an
+ * allocation may only be cleared from within the same enclosing class.
  */
 export class ScopeTracker {
   private nextScopeId = 0;
@@ -58,7 +99,7 @@ export class ScopeTracker {
   private declaredVariables = new Map<number, Set<string>>();
   private scopeKinds = new Map<number, ScopeKind>();
   private scopeTags = new Map<number, string | null>();
-  private conditionalDepth = 0;
+  private conditionalStack: any[] = [];
 
   /** Call at Program entry to create the root (module) scope. */
   enterRootScope() {
@@ -70,14 +111,15 @@ export class ScopeTracker {
   }
 
   /**
-   * Enter a new scope boundary. Use `'function'` for function/arrow bodies and
-   * `'block'` (default) for block statements so `let`/`const` shadowing is
-   * modeled correctly.
+   * Enter a new scope boundary. Use `'function'` for function/arrow bodies,
+   * `'class'` for class bodies, and `'block'` (default) for block statements
+   * so `let`/`const` shadowing is modeled correctly.
    *
-   * `tag` optionally records the CallExpression callee, method name, or
-   * function name that introduced this scope (e.g. `watch`, `onMounted`,
-   * `stop`, `unmount`), so rules can tell apart reactive-effect wrappers from
-   * plain DOM/event callbacks and recognize teardown contexts.
+   * `tag` optionally records the CallExpression callee, method name, class
+   * name, or function name that introduced this scope (e.g. `watch`,
+   * `onMounted`, `stop`, `unmount`, `MyClass`), so rules can tell apart
+   * reactive-effect wrappers from plain DOM/event callbacks and recognize
+   * teardown contexts.
    */
   enterScope(kind: ScopeKind = 'block', tag: string | null = null) {
     const id = this.nextScopeId++;
@@ -96,81 +138,68 @@ export class ScopeTracker {
     return this.scopeStack[this.scopeStack.length - 1] ?? 0;
   }
 
-  private conditionalNode: any = null;
-
   enterConditional(node?: any) {
-    this.conditionalDepth++;
-    this.conditionalNode = node || null;
+    this.conditionalStack.push(node ?? null);
   }
 
   exitConditional() {
-    this.conditionalDepth--;
-    this.conditionalNode = null;
+    this.conditionalStack.pop();
   }
 
   isInConditionalBranch(): boolean {
-    return this.conditionalDepth > 0;
+    return this.conditionalStack.length > 0;
   }
 
   /**
-   * Returns true if the stored conditional node directly guards the given name.
-   * Checks for: direct identifier match (if id), binary null check (if id !== null),
-   * and logical guard (if id || something / if id && something).
+   * Returns true when `node`, a conditional construct, directly guards the
+   * given name. Recognizes a direct identifier test (`if (id)`), a comparison
+   * against `null`/`undefined` (`if (id !== null)`, `if (id != undefined)`),
+   * a logical short-circuit (`if (id && ready)` / `if (id || ready)`), and the
+   * same patterns behind an optional chain (`if (id?.ready)`).
    */
-  isSelfGuarded(name: string): boolean {
-    if (!this.conditionalNode) return false;
+  isSelfGuarded(node: any, name: string): boolean {
+    if (!node || typeof node !== 'object' || !name) return false;
 
-    const node = this.conditionalNode;
+    // Unwrap the conditional wrapper to reach the guard expression itself.
+    let guard = node;
+    if (GUARDED_CONDITION_TYPES.has(guard.type)) {
+      guard = guard.test;
+    }
+    if (!guard || typeof guard !== 'object') return false;
 
-    // Direct identifier match: if (id)
-    if (node.type === 'Identifier' && node.name === name) return true;
+    // Optional chains wrap the real test in a ChainExpression.
+    if (guard.type === 'ChainExpression') guard = guard.expression;
+    if (!guard || typeof guard !== 'object') return false;
 
-    // Binary check against null/undefined: if (id !== null) or if (id != null)
-    if (node.type === 'BinaryExpression') {
-      const leftName =
-        node.left.type === 'Identifier' ? node.left.name : null;
-      const rightIsNull =
-        node.right.type === 'Literal' && node.right.value === null;
-      const rightIsIdentifierNull =
-        node.right.type === 'Identifier' &&
-        node.right.name === 'null' &&
-        node.left.type === 'Literal' &&
-        node.left.value === null;
+    if (guard.type === 'Identifier') return guard.name === name;
 
-      if (
-        (leftName === name && rightIsNull) ||
-        (rightIsIdentifierNull && leftName === name)
-      )
-        return true;
+    if (guard.type === 'MemberExpression') {
+      // `if (id?.ready)` — an optional chain only evaluates when the base
+      // object is non-null, so reaching the body proves the resource exists.
+      const object = guard.object;
+      if (object?.type === 'Identifier') return object.name === name;
+      if (object?.type === 'ChainExpression') return this.isSelfGuarded(object, name);
+      return false;
     }
 
-    // Logical guard: if (id || something) or if (id && something)
-    if (node.type === 'LogicalExpression') {
-      const leftIsName =
-        node.left.type === 'Identifier' && node.left.name === name;
-      const rightIsName =
-        node.right.type === 'Identifier' && node.right.name === name;
-      if (leftIsName || rightIsName) return true;
-    }
+    const NULLISH = new Set(['null', 'undefined']);
+    const isNullish = (operand: any): boolean =>
+      (operand?.type === 'Literal' && operand.value === null) ||
+      (operand?.type === 'Identifier' && NULLISH.has(operand.name));
 
-    // Optional chain guard: if (id?.something) — the inner identifier matches
-    if (node.type === 'ChainExpression') {
-      const inner = node.expression;
-      if (
-        inner.type === 'Identifier' &&
-        inner.name === name
-      )
-        return true;
-      if (
-        inner.type === 'BinaryExpression' ||
-        inner.type === 'LogicalExpression'
-      ) {
-        const leftName =
-          inner.left.type === 'Identifier' ? inner.left.name : null;
-        const rightName =
-          inner.right.type === 'Identifier' ? inner.right.name : null;
-        if (leftName === name || rightName === name) return true;
+    if (guard.type === 'BinaryExpression') {
+      if (guard.operator !== '==' && guard.operator !== '===' && guard.operator !== '!=' && guard.operator !== '!==') {
+        return false;
       }
+      const left = guard.left?.type === 'Identifier' ? guard.left.name : null;
+      const right = guard.right?.type === 'Identifier' ? guard.right.name : null;
+      return (left === name && isNullish(guard.right)) || (right === name && isNullish(guard.left));
+    }
+
+    if (guard.type === 'LogicalExpression') {
+      const left = guard.left?.type === 'Identifier' ? guard.left.name : null;
+      const right = guard.right?.type === 'Identifier' ? guard.right.name : null;
+      return left === name || right === name;
     }
 
     return false;
@@ -178,8 +207,8 @@ export class ScopeTracker {
 
   /**
    * Returns true if the current scope is nested inside a function boundary
-   * (function declaration, function expression, or arrow function). The root
-   * module scope is not considered a function.
+   * (function declaration, function expression, arrow function, or class
+   * method). The root module scope is not considered a function.
    */
   isNestedInFunction(): boolean {
     for (let i = 1; i < this.scopeStack.length; i++) {
@@ -204,10 +233,10 @@ export class ScopeTracker {
   }
 
   /**
- * Record a variable declaration in the current lexical environment.
- * `var` declarations are hoisted to the nearest enclosing function scope.
- */
-declareVariable(name: string, kind: 'var' | 'let' | 'const' | 'using' | 'await-using' = 'let') {
+   * Record a variable declaration in the current lexical environment.
+   * `var` declarations are hoisted to the nearest enclosing function scope.
+   */
+  declareVariable(name: string, kind: 'var' | 'let' | 'const' | 'using' | 'await-using' = 'let') {
     const scopeId = kind === 'var' ? this.nearestFunctionScopeId() : this.currentScopeId();
     let names = this.declaredVariables.get(scopeId);
     if (!names) {
@@ -228,11 +257,15 @@ declareVariable(name: string, kind: 'var' | 'let' | 'const' | 'using' | 'await-u
   }
 
   addClearance(name: string) {
-    const isSelf = this.isSelfGuarded(name);
+    const inConditional = this.isInConditionalBranch();
+    // A clearance is unconditional when any enclosing guard tests for the
+    // resource itself — `if (id) clearInterval(id)`. Nesting a further
+    // conditional inside that guard must not downgrade it.
+    const selfGuarded = inConditional && this.conditionalStack.some((node) => this.isSelfGuarded(node, name));
     this.clearances.push({
       name,
       scopeId: this.currentScopeId(),
-      conditional: this.conditionalDepth > 0 && !isSelf,
+      conditional: inConditional && !selfGuarded,
     });
   }
 
@@ -270,20 +303,74 @@ declareVariable(name: string, kind: 'var' | 'let' | 'const' | 'using' | 'await-u
   }
 
   /**
+   * Returns the ID of the nearest enclosing class scope for `scopeId`, or
+   * `null` when the scope is not inside a class.
+   *
+   * The walk passes through block and function scopes so that allocations and
+   * clearances written inside class methods (or blocks nested in them) resolve
+   * to the owning class. The first class scope found is the answer, which means
+   * the search stops at class boundaries: sibling classes resolve to different
+   * IDs, and a nested class resolves to the inner one.
+   */
+  private findContainingClassScope(scopeId: number): number | null {
+    let current: number | undefined = scopeId;
+    while (current !== undefined) {
+      if (this.scopeKinds.get(current) === 'class') return current;
+      current = this.parentMap.get(current);
+    }
+    return null;
+  }
+
+  /**
+   * Returns the ID of the class scope that owns the current position, or
+   * `null` when not inside a class. Rules resolving `this.*` resources can use
+   * this to pin an allocation to its class instance.
+   */
+  getEnclosingClassScopeId(): number | null {
+    return this.findContainingClassScope(this.currentScopeId());
+  }
+
+  /**
    * Returns every clearance that is scope-applicable to the given allocation.
    *
    * For lexical names, the clearance must resolve to the exact same
    * declaration scope as the allocation (with a same-subtree fallback when the
-   * name has no tracked declaration). For member expressions (`this.timer`,
-   * `ref.current`) the resource lives on a shared object/context, so a
-   * clearance is applicable only when it occurs within the allocation's own
+   * name has no tracked declaration).
+   *
+   * For member expressions (`ref.current`) the resource lives on a shared
+   * object/context, so a clearance applies only within the allocation's own
    * scope subtree or inside a recognized teardown scope (e.g. `unmount`,
    * `onUnmounted`, `close`, `stop`).
+   *
+   * For class instance state (`this.timer`, `this[key]`) the walk up the parent
+   * chain halts as soon as it crosses a class boundary: a clearance only
+   * applies when it resolves to the same enclosing class as the allocation.
    */
   private matchingClearances(name: string, allocScopeId: number): RecordedClearance[] {
     const isMemberExpression = name.includes('.') || name.includes('[');
 
     if (isMemberExpression) {
+      const matches: RecordedClearance[] = [];
+
+      if (isClassInstanceMemberName(name)) {
+        const allocClassScope = this.findContainingClassScope(allocScopeId);
+
+        for (const c of this.clearances) {
+          if (c.name !== name) continue;
+          // Halt on class boundary: the clearance must belong to the very same
+          // class instance that owns the allocation. When neither side is in a
+          // class (`null === null`) the legacy subtree rules still apply.
+          if (this.findContainingClassScope(c.scopeId) !== allocClassScope) continue;
+          if (this.isDescendantOrSame(c.scopeId, allocScopeId) || this.isTeardownScope(c.scopeId)) {
+            matches.push(c);
+          }
+        }
+
+        return matches;
+      }
+
+      // Shared-context members (`ref.current`, `store.subs`) are not owned by a
+      // class, so they keep the original subtree/teardown behavior.
       return this.clearances.filter(
         (c) =>
           c.name === name &&
@@ -305,10 +392,7 @@ declareVariable(name: string, kind: 'var' | 'let' | 'const' | 'using' | 'await-u
       }
 
       if (allocDeclScope === null && clearanceDeclScope === null) {
-        if (
-          this.isDescendantOrSame(c.scopeId, allocScopeId) ||
-          this.isDescendantOrSame(allocScopeId, c.scopeId)
-        ) {
+        if (this.isDescendantOrSame(c.scopeId, allocScopeId) || this.isDescendantOrSame(allocScopeId, c.scopeId)) {
           matches.push(c);
         }
       }
@@ -338,36 +422,13 @@ declareVariable(name: string, kind: 'var' | 'let' | 'const' | 'using' | 'await-u
   /**
    * Returns true when `name` is cleared by an unconditional clearance that
    * occurs inside the scope subtree rooted at `containerScopeId` (e.g. a
-   * `useEffect` body). Clearances and the allocation must still resolve to the
-   * same lexical declaration.
+   * `useEffect` body). Class instance members (`this.timer`) must additionally
+   * resolve to the same enclosing class as the allocation.
    */
   isClearedWithin(name: string, allocScopeId: number, containerScopeId: number): boolean {
-    const isMemberExpression = name.includes('.') || name.includes('[');
-    const allocDeclScope = this.resolveDeclarationScope(name, allocScopeId);
-
-    for (const c of this.clearances) {
-      if (c.name !== name || c.conditional) continue;
-      if (!this.isDescendantOrSame(c.scopeId, containerScopeId)) continue;
-
-      if (isMemberExpression) return true;
-
-      const clearanceDeclScope = this.resolveDeclarationScope(name, c.scopeId);
-
-      if (allocDeclScope !== null && clearanceDeclScope !== null) {
-        if (allocDeclScope === clearanceDeclScope) return true;
-        continue;
-      }
-
-      if (allocDeclScope === null && clearanceDeclScope === null) {
-        if (
-          this.isDescendantOrSame(c.scopeId, allocScopeId) ||
-          this.isDescendantOrSame(allocScopeId, c.scopeId)
-        ) {
-          return true;
-        }
-      }
-    }
-    return false;
+    return this.matchingClearances(name, allocScopeId).some(
+      (c) => !c.conditional && this.isDescendantOrSame(c.scopeId, containerScopeId)
+    );
   }
 
   getScopeTag(scopeId: number): string | null {
@@ -392,15 +453,16 @@ declareVariable(name: string, kind: 'var' | 'let' | 'const' | 'using' | 'await-u
   }
 }
 
-const BLOCK_SCOPE_NODE_TYPES = ['BlockStatement', 'ForStatement', 'ForInStatement', 'ForOfStatement', 'SwitchStatement'];
-
-const FUNCTION_SCOPE_NODE_TYPES = ['FunctionDeclaration', 'FunctionExpression', 'ArrowFunctionExpression'];
-
 /**
- * Conditional constructs that should mark any clearance inside them as
- * "conditional" (a guard that may not execute).
+ * Derives a semantic tag for a class scope from the class node itself. Named
+ * classes (`class Timer { ... }`) and named class expressions
+ * (`const Timer = class Inner { ... }`) produce their identifier; anonymous
+ * class expressions produce null.
  */
-const CONDITIONAL_NODE_TYPES = ['IfStatement', 'SwitchCase', 'ConditionalExpression'];
+function getClassScopeTag(node: any): string | null {
+  if (node && node.id && node.id.type === 'Identifier' && node.id.name) return node.id.name;
+  return null;
+}
 
 /**
  * Derives a semantic tag for a function scope from its surrounding context:
@@ -457,6 +519,9 @@ export interface ScopeListenersHooks {
  *  - Block boundaries: BlockStatement, for/for-in/for-of loops, SwitchStatement.
  *  - Function boundaries (with parameter declarations), tagged with their
  *    introducing call/method/function name via `hooks` when provided.
+ *  - Class boundaries: ClassDeclaration, ClassExpression and ClassBody, each
+ *    opening a single `'class'` scope tagged with the class name. Method bodies
+ *    then nest underneath it, so `this.*` state stays pinned to one instance.
  *  - CatchClause (with its bound parameter).
  *  - VariableDeclarator declarations, including destructured patterns.
  *  - Conditional constructs (`if`, `switch` case, `? :`, `&&`, `||`) which
@@ -512,6 +577,40 @@ export function attachScopeListeners(tracker: ScopeTracker, visitor: RuleVisitor
     };
   }
 
+  // Class scope bookkeeping. `ClassDeclaration`/`ClassExpression` open the
+  // class scope; `ClassBody` is intercepted as well so a dialect that only
+  // exposes the body still gets a scope, but it must never nest a second scope
+  // inside the one its parent class already opened.
+  const openClassScopes: any[] = [];
+  const classBodyOwnedScopes = new WeakSet<object>();
+
+  const classScopeOwner = (node: any, parent: any): any => parent ?? node;
+
+  for (const type of CLASS_SCOPE_NODE_TYPES) {
+    visitor[type] = (node: any) => {
+      tracker.enterScope('class', getClassScopeTag(node));
+      openClassScopes.push(node);
+    };
+    visitor[`${type}:exit`] = () => {
+      openClassScopes.pop();
+      tracker.leaveScope();
+    };
+  }
+
+  visitor.ClassBody = (node: any, parent: any) => {
+    const owner = classScopeOwner(node, parent);
+    if (openClassScopes[openClassScopes.length - 1] === owner) return;
+    tracker.enterScope('class', getClassScopeTag(owner));
+    openClassScopes.push(owner);
+    classBodyOwnedScopes.add(node);
+  };
+  visitor['ClassBody:exit'] = (node: any) => {
+    if (!classBodyOwnedScopes.has(node)) return;
+    classBodyOwnedScopes.delete(node);
+    openClassScopes.pop();
+    tracker.leaveScope();
+  };
+
   visitor.VariableDeclarator = (node: any, parent: any) => {
     const kind = getDeclarationKind(parent);
     for (const name of extractIdentifiersFromPattern(node.id)) {
@@ -520,7 +619,8 @@ export function attachScopeListeners(tracker: ScopeTracker, visitor: RuleVisitor
   };
 
   // Class fields (e.g. `timer = setInterval(...)` in a class body) live on the
-  // instance as `this.timer`, so they are declared as member-expression names.
+  // instance as `this.timer`, so they are declared as member-expression names
+  // against the enclosing class scope.
   visitor.PropertyDefinition = (node: any) => {
     if (node.key && node.key.type === 'Identifier') {
       tracker.declareVariable(`this.${node.key.name}`, 'let');
