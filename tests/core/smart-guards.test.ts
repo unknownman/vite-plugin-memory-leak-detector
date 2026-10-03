@@ -32,13 +32,45 @@ describe('Smart conditional guards - scope.isSelfGuarded', () => {
     expect(runRule(noUnclearedTimersRule, code)).toHaveLength(0);
   });
 
-  it('treats a logical `&&` guard as a self guard', () => {
+  // Changed expectation (Phase 1.3): a `&&` test only counts as a self guard
+  // when EVERY conjunct is a guard form of the resource. `if (id && ready)`
+  // skips the body for a reason unrelated to `id`, so the timer can outlive it.
+  it('treats `if (id && ready)` as conditional, not a self guard', () => {
     const code = `
       let id = setInterval(tick, 1000);
       let ready = true;
       if (id && ready) { clearInterval(id); }
     `;
+    const diagnostics = runRule(noUnclearedTimersRule, code);
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0].message).toContain('only cleared conditionally');
+  });
+
+  it('accepts `&&` tests where every conjunct guards the same resource', () => {
+    const code = `
+      let id = setInterval(tick, 1000);
+      if (id && id !== null) { clearInterval(id); }
+    `;
     expect(runRule(noUnclearedTimersRule, code)).toHaveLength(0);
+  });
+
+  it('keeps the expression form `id && clearInterval(id)` unconditional', () => {
+    const code = `
+      let id = setInterval(tick, 1000);
+      id && clearInterval(id);
+    `;
+    expect(runRule(noUnclearedTimersRule, code)).toHaveLength(0);
+  });
+
+  it('reports `ready && id && clearInterval(id)` as conditional', () => {
+    const code = `
+      let id = setInterval(tick, 1000);
+      let ready = true;
+      ready && id && clearInterval(id);
+    `;
+    const diagnostics = runRule(noUnclearedTimersRule, code);
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0].message).toContain('only cleared conditionally');
   });
 
   it('treats an optional-chain guard as a self guard', () => {
@@ -75,6 +107,81 @@ describe('Smart conditional guards - scope.isSelfGuarded', () => {
       clearInterval(id);
     `;
     expect(runRule(noUnclearedTimersRule, code)).toHaveLength(0);
+  });
+
+  it('treats `if (this.timer)` as a self guard', () => {
+    const code = `
+      class Widget {
+        timer = setInterval(tick, 1000);
+        destroy() {
+          if (this.timer) { clearInterval(this.timer); }
+        }
+      }
+    `;
+    expect(runRule(noUnclearedTimersRule, code)).toHaveLength(0);
+  });
+
+  it('treats `if (this.timer !== null)` as a self guard', () => {
+    const code = `
+      class Widget {
+        timer = setInterval(tick, 1000);
+        destroy() {
+          if (this.timer !== null) { clearInterval(this.timer); }
+        }
+      }
+    `;
+    expect(runRule(noUnclearedTimersRule, code)).toHaveLength(0);
+  });
+});
+
+describe('Conditional guards - nesting and branch awareness', () => {
+  it('reports a nested unrelated guard even when the inner guard is a self guard', () => {
+    const code = `
+      let id = setInterval(tick, 1000);
+      let ready = true;
+      if (ready) { if (id) { clearInterval(id); } }
+    `;
+    const diagnostics = runRule(noUnclearedTimersRule, code);
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0].message).toContain('only cleared conditionally');
+  });
+
+  it('reports a clearance in the `else` branch of its own guard', () => {
+    const code = `
+      let id = setInterval(tick, 1000);
+      if (id) { } else { clearInterval(id); }
+    `;
+    const diagnostics = runRule(noUnclearedTimersRule, code);
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0].message).toContain('only cleared conditionally');
+  });
+
+  it('reports a clearance in the consequent of `if (!id)`', () => {
+    const code = `
+      let id = setInterval(tick, 1000);
+      if (!id) { clearInterval(id); }
+    `;
+    const diagnostics = runRule(noUnclearedTimersRule, code);
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0].message).toContain('only cleared conditionally');
+  });
+
+  it('still accepts a clearance in the consequent of a positive guard', () => {
+    const code = `
+      let id = setInterval(tick, 1000);
+      if (id) { clearInterval(id); }
+    `;
+    expect(runRule(noUnclearedTimersRule, code)).toHaveLength(0);
+  });
+
+  it('keeps a `case` label conditional', () => {
+    const code = `
+      let id = setInterval(tick, 1000);
+      switch (mode) { case 1: clearInterval(id); }
+    `;
+    const diagnostics = runRule(noUnclearedTimersRule, code);
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0].message).toContain('only cleared conditionally');
   });
 });
 

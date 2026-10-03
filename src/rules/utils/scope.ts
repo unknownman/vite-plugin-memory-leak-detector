@@ -1,5 +1,5 @@
 import type { RuleVisitor } from '../../types/rule.js';
-import { extractIdentifiersFromPattern, getDeclarationKind } from './tracker.js';
+import { extractIdentifiersFromPattern, getDeclarationKind, getExpressionName } from './tracker.js';
 
 export interface ScopedAllocation {
   name: string;
@@ -13,6 +13,17 @@ interface RecordedClearance {
   conditional: boolean;
 }
 
+/**
+ * One entry per conditional construct currently enclosing the cursor. `node` is
+ * the conditional node itself (used to evaluate the guard) and `branch` records
+ * which of its branches the cursor is in — `null` while inside the guard
+ * expression itself.
+ */
+interface ConditionalEntry {
+  node: any;
+  branch: 'consequent' | 'alternate' | null;
+}
+
 export type ScopeKind = 'function' | 'block' | 'class';
 
 /**
@@ -20,20 +31,33 @@ export type ScopeKind = 'function' | 'block' | 'class';
  * member-expression resource (e.g. `this.timer`) may only be considered
  * cleared when the clearance occurs in the same scope subtree as the
  * allocation, or inside one of these lifecycle/teardown hooks.
+ *
+ * This list covers non-class contexts (object literals, plain functions). For
+ * `this.*` inside a class, `matchingClearances` accepts a clearance from any
+ * method of the same class, so the tag list is not the limiting factor there.
  */
 export const TEARDOWN_SCOPE_TAGS = new Set([
   'unmount',
   'onUnmount',
   'onUnmounted',
   'onBeforeUnmount',
+  'beforeUnmount',
+  'unmounted',
   'componentWillUnmount',
   'onDestroy',
+  'beforeDestroy',
+  'destroyed',
+  'ngOnDestroy',
   'onCleanup',
   'close',
   'disconnect',
+  'disconnectedCallback',
   'stop',
   'cleanup',
   'teardown',
+  'destroy',
+  'dispose',
+  'shutdown',
 ]);
 
 /**
@@ -55,13 +79,31 @@ const CONDITIONAL_NODE_TYPES = ['IfStatement', 'SwitchCase', 'ConditionalExpress
 
 /**
  * Conditional constructs whose guard expression lives on `.test`. `SwitchCase`
- * is deliberately absent: it has no guard expression of its own.
+ * is deliberately absent: it is pushed as a conditional but has no guard
+ * expression of its own, so a clearance inside a `case` stays conditional.
  */
-const GUARDED_CONDITION_TYPES = new Set([
-  'IfStatement',
-  'ConditionalExpression',
-  'WhileStatement',
-  'DoWhileStatement',
+const GUARDED_CONDITION_TYPES = new Set(['IfStatement', 'ConditionalExpression']);
+
+/**
+ * Node types that can begin a branch of an `if`/ternary, used to tell whether
+ * the current position sits in the consequent or the alternate. The guard that
+ * introduced the conditional only protects the consequent: in
+ * `if (id) { ... } else { clearInterval(id) }` the clearance runs precisely
+ * when the guard is false.
+ */
+const BRANCH_STATEMENT_TYPES = ['BlockStatement', 'ExpressionStatement', 'ReturnStatement', 'ThrowStatement', 'IfStatement'];
+
+/** Call names that release a resource, used to locate a clearance inside an expression. */
+const CLEARANCE_CALL_NAMES = new Set([
+  'clearInterval',
+  'clearTimeout',
+  'cancelAnimationFrame',
+  'removeEventListener',
+  'close',
+  'abort',
+  'disconnect',
+  'unsubscribe',
+  'off',
 ]);
 
 /**
@@ -90,6 +132,17 @@ function isClassInstanceMemberName(name: string): boolean {
  * Class instance state (`this.*`) additionally respects class boundaries: an
  * allocation may only be cleared from within the same enclosing class.
  */
+/**
+ * Returns true when `operand` is one of the nullish literals/names
+ * (`null`, `undefined`), i.e. the kind of value a resource is compared against
+ * in a guard like `if (id !== null)`.
+ */
+function isNullishOperand(operand: any): boolean {
+  if (!operand || typeof operand !== 'object') return false;
+  if (operand.type === 'Literal' && operand.value === null) return true;
+  return operand.type === 'Identifier' && (operand.name === 'null' || operand.name === 'undefined');
+}
+
 export class ScopeTracker {
   private nextScopeId = 0;
   private scopeStack: number[] = [];
@@ -99,7 +152,7 @@ export class ScopeTracker {
   private declaredVariables = new Map<number, Set<string>>();
   private scopeKinds = new Map<number, ScopeKind>();
   private scopeTags = new Map<number, string | null>();
-  private conditionalStack: any[] = [];
+  private conditionalStack: ConditionalEntry[] = [];
 
   /** Call at Program entry to create the root (module) scope. */
   enterRootScope() {
@@ -139,7 +192,7 @@ export class ScopeTracker {
   }
 
   enterConditional(node?: any) {
-    this.conditionalStack.push(node ?? null);
+    this.conditionalStack.push({ node: node ?? null, branch: null });
   }
 
   exitConditional() {
@@ -151,14 +204,123 @@ export class ScopeTracker {
   }
 
   /**
+   * Records that the cursor just entered one branch of the innermost
+   * conditional, so the guard that introduced it is not treated as protecting
+   * this position when the branch is the `else` side.
+   */
+  enterConditionalBranch(branch: 'consequent' | 'alternate') {
+    const top = this.conditionalStack[this.conditionalStack.length - 1];
+    if (top) top.branch = branch;
+  }
+
+  /** Clears the branch marker once the walker leaves a conditional branch. */
+  exitConditionalBranch() {
+    const top = this.conditionalStack[this.conditionalStack.length - 1];
+    if (top) top.branch = null;
+  }
+
+  /**
+   * Returns true when `operand` is a guard expression that proves `name`
+   * exists. Accepts a plain reference (`id`, `this.timer`) and nullish
+   * comparisons (`id !== null`, `this.timer != undefined`). For `&&` chains
+   * EVERY conjunct must be such a guard; for `||` any disjunct suffices,
+   * since reaching the body proves at least one of them held.
+   */
+  private isGuardForm(operand: any, name: string): boolean {
+    if (!operand || typeof operand !== 'object') return false;
+
+    // Optional chains wrap their real expression in a ChainExpression. Only then
+    // does a member access prove the resource exists (`id?.ready`); a plain
+    // `id.ready` says nothing about whether `id` was ever set.
+    const isChain = operand.type === 'ChainExpression';
+    const target = isChain ? operand.expression : operand;
+    if (!target || typeof target !== 'object') return false;
+
+    if (target.type === 'Identifier' || target.type === 'MemberExpression') {
+      if (getExpressionName(target) === name) return true;
+      // `if (id?.ready)` — the body only runs when the base object is
+      // non-nullish, so reaching it proves the resource exists.
+      return isChain && target.type === 'MemberExpression' && getExpressionName(target.object) === name;
+    }
+
+    if (target.type === 'BinaryExpression') {
+      if (!['==', '===', '!=', '!=='].includes(target.operator)) return false;
+      return (
+        (getExpressionName(target.left) === name && isNullishOperand(target.right)) ||
+        (getExpressionName(target.right) === name && isNullishOperand(target.left))
+      );
+    }
+
+    if (target.type === 'LogicalExpression') {
+      return target.operator === '&&'
+        ? this.isGuardForm(target.left, name) && this.isGuardForm(target.right, name)
+        : this.isGuardForm(target.left, name) || this.isGuardForm(target.right, name);
+    }
+
+    return false;
+  }
+
+  /**
+   * Walks down the left spine of an `&&` chain and returns the first conjunct,
+   * i.e. the condition that must hold before anything else in the expression is
+   * evaluated.
+   */
+  private leftmostConjunct(node: any): any {
+    let current = node;
+    while (current && current.type === 'LogicalExpression' && current.operator === '&&') {
+      current = current.left;
+    }
+    return current;
+  }
+
+  /**
+   * Returns true when `node`'s subtree contains a call that releases `name`
+   * (e.g. `id && clearInterval(id)`). Such an expression gates the clearance
+   * itself rather than merely guarding a block.
+   */
+  private containsClearanceOf(node: any, name: string, depth = 0): boolean {
+    if (!node || typeof node !== 'object' || depth > 32) return false;
+
+    if (node.type === 'CallExpression') {
+      const callee = node.callee;
+      const calleeName = callee ? getExpressionName(callee) : null;
+      if (calleeName && CLEARANCE_CALL_NAMES.has(calleeName) && getExpressionName(node.arguments?.[0]) === name) {
+        return true;
+      }
+    }
+
+    for (const key of Object.keys(node)) {
+      if (key === 'type' || key === 'loc' || key === 'start' || key === 'end') continue;
+      const value = (node as any)[key];
+      if (!value || typeof value !== 'object') continue;
+      if (Array.isArray(value)) {
+        for (const item of value) {
+          if (this.containsClearanceOf(item, name, depth + 1)) return true;
+        }
+      } else if (this.containsClearanceOf(value, name, depth + 1)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
    * Returns true when `node`, a conditional construct, directly guards the
-   * given name. Recognizes a direct identifier test (`if (id)`), a comparison
-   * against `null`/`undefined` (`if (id !== null)`, `if (id != undefined)`),
-   * a logical short-circuit (`if (id && ready)` / `if (id || ready)`), and the
-   * same patterns behind an optional chain (`if (id?.ready)`).
+   * given name. Recognizes a direct reference (`if (id)`, `if (this.timer)`),
+   * a comparison against `null`/`undefined` (`if (id !== null)`), logical
+   * short-circuits, and the same patterns behind an optional chain
+   * (`if (id?.ready)`).
+   *
+   * A guard sitting in the `else` branch of the very conditional it came from
+   * is not a guard at all (`if (id) {} else { clearInterval(id) }` runs when
+   * `id` is falsy), so that case returns false.
    */
   isSelfGuarded(node: any, name: string): boolean {
     if (!node || typeof node !== 'object' || !name) return false;
+
+    // The guard only protects the consequent of the conditional that owns it.
+    const top = this.conditionalStack[this.conditionalStack.length - 1];
+    if (top && top.node === node && top.branch === 'alternate') return false;
 
     // Unwrap the conditional wrapper to reach the guard expression itself.
     let guard = node;
@@ -167,42 +329,25 @@ export class ScopeTracker {
     }
     if (!guard || typeof guard !== 'object') return false;
 
-    // Optional chains wrap the real test in a ChainExpression.
-    if (guard.type === 'ChainExpression') guard = guard.expression;
-    if (!guard || typeof guard !== 'object') return false;
+    if (guard.type !== 'LogicalExpression') return this.isGuardForm(guard, name);
 
-    if (guard.type === 'Identifier') return guard.name === name;
-
-    if (guard.type === 'MemberExpression') {
-      // `if (id?.ready)` — an optional chain only evaluates when the base
-      // object is non-null, so reaching the body proves the resource exists.
-      const object = guard.object;
-      if (object?.type === 'Identifier') return object.name === name;
-      if (object?.type === 'ChainExpression') return this.isSelfGuarded(object, name);
-      return false;
+    if (guard.operator === '||') {
+      // Either disjunct holding is enough to establish the resource exists.
+      return this.isGuardForm(guard.left, name) || this.isGuardForm(guard.right, name);
     }
 
-    const NULLISH = new Set(['null', 'undefined']);
-    const isNullish = (operand: any): boolean =>
-      (operand?.type === 'Literal' && operand.value === null) ||
-      (operand?.type === 'Identifier' && NULLISH.has(operand.name));
-
-    if (guard.type === 'BinaryExpression') {
-      if (guard.operator !== '==' && guard.operator !== '===' && guard.operator !== '!=' && guard.operator !== '!==') {
-        return false;
-      }
-      const left = guard.left?.type === 'Identifier' ? guard.left.name : null;
-      const right = guard.right?.type === 'Identifier' ? guard.right.name : null;
-      return (left === name && isNullish(guard.right)) || (right === name && isNullish(guard.left));
+    // `&&` has two distinct meanings depending on where the clearance sits.
+    if (this.containsClearanceOf(guard, name)) {
+      // Expression form — `id && clearInterval(id)`. The clearance is gated
+      // directly by the leftmost conjunct, so that one condition is what
+      // matters: `ready && id && clearInterval(id)` still leaks.
+      return this.isGuardForm(this.leftmostConjunct(guard), name);
     }
 
-    if (guard.type === 'LogicalExpression') {
-      const left = guard.left?.type === 'Identifier' ? guard.left.name : null;
-      const right = guard.right?.type === 'Identifier' ? guard.right.name : null;
-      return left === name || right === name;
-    }
-
-    return false;
+    // Test form — `if (id && ready)`. Every conjunct must establish that the
+    // resource exists, because the body runs once all of them held and would
+    // otherwise skip the clearance for a reason unrelated to the resource.
+    return this.isGuardForm(guard.left, name) && this.isGuardForm(guard.right, name);
   }
 
   /**
@@ -257,11 +402,16 @@ export class ScopeTracker {
   }
 
   addClearance(name: string) {
-    const inConditional = this.isInConditionalBranch();
-    // A clearance is unconditional when any enclosing guard tests for the
-    // resource itself — `if (id) clearInterval(id)`. Nesting a further
-    // conditional inside that guard must not downgrade it.
-    const selfGuarded = inConditional && this.conditionalStack.some((node) => this.isSelfGuarded(node, name));
+    const entries = this.conditionalStack;
+    const inConditional = entries.length > 0;
+
+    // A clearance counts as unconditional only when EVERY enclosing conditional
+    // is a self-guard for this exact resource. A single unrelated guard — or a
+    // `case` label, or the `else` side of the guard itself — means the
+    // clearance may never run, so the resource can still leak.
+    const selfGuarded =
+      inConditional && entries.every((entry) => entry.node && this.isSelfGuarded(entry.node, name));
+
     this.clearances.push({
       name,
       scopeId: this.currentScopeId(),
@@ -361,7 +511,13 @@ export class ScopeTracker {
           // class instance that owns the allocation. When neither side is in a
           // class (`null === null`) the legacy subtree rules still apply.
           if (this.findContainingClassScope(c.scopeId) !== allocClassScope) continue;
-          if (this.isDescendantOrSame(c.scopeId, allocScopeId) || this.isTeardownScope(c.scopeId)) {
+          // Inside a class, the instance itself is the lifecycle boundary, so a
+          // clearance from ANY method of that class releases the resource —
+          // `constructor()` + `dispose()` needs no special method name. Outside
+          // a class there is no such boundary and the subtree/teardown rules
+          // decide as before.
+          const sameClassInstance = allocClassScope !== null;
+          if (sameClassInstance || this.isDescendantOrSame(c.scopeId, allocScopeId) || this.isTeardownScope(c.scopeId)) {
             matches.push(c);
           }
         }
@@ -548,6 +704,27 @@ export function attachScopeListeners(tracker: ScopeTracker, visitor: RuleVisitor
   };
   visitor['LogicalExpression:exit'] = (node: any) => {
     if (node.operator === '&&' || node.operator === '||') tracker.exitConditional();
+  };
+
+  // Mark which branch of an `if`/`? :` the walker is entering, so a guard is
+  // not credited for protecting the `else` side. These handlers wrap whatever
+  // handler is already registered for the node type (the block-scope listener
+  // above, or a rule's own) so scope tracking is unaffected.
+  for (const type of BRANCH_STATEMENT_TYPES) {
+    const enter = visitor[type];
+    const leave = visitor[`${type}:exit`];
+    visitor[type] = (node: any, parent: any, ancestors?: any[]) => {
+      if (parent && (parent.type === 'IfStatement' || parent.type === 'ConditionalExpression')) {
+        tracker.enterConditionalBranch(parent.alternate === node ? 'alternate' : 'consequent');
+      }
+      enter?.(node, parent, ancestors);
+    };
+    visitor[`${type}:exit`] = (node: any, parent: any, ancestors?: any[]) => {
+      leave?.(node, parent, ancestors);
+      if (parent && (parent.type === 'IfStatement' || parent.type === 'ConditionalExpression')) {
+        tracker.exitConditionalBranch();
+      }
+    };
   };
 
   visitor.CatchClause = (node: any) => {

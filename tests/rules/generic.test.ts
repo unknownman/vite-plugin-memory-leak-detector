@@ -382,7 +382,12 @@ it('allows members expressions cleared anywhere in the file (this.timer)', () =>
     expect(diagnostics).toHaveLength(0);
   });
 
-  it('flags member expression cleared in an unrelated scope (this.timer)', () => {
+  // Changed expectation (Phase 1.5): a class instance is its own lifecycle
+  // boundary, so `this.timer` allocated in `start()` is released by a
+  // `clearInterval` in ANY method of that same class. Isolation is now
+  // enforced across classes, not across method names — see
+  // tests/core/class-isolation.test.ts for the sibling/nested class cases.
+  it('accepts a this.* clearance from any method of the same class', () => {
     const code = `
       class Widget {
         start() {
@@ -394,8 +399,7 @@ it('allows members expressions cleared anywhere in the file (this.timer)', () =>
       }
     `;
     const diagnostics = runRule(noUnclearedTimersRule, code);
-    expect(diagnostics).toHaveLength(1);
-    expect(diagnostics[0].message).toContain("Timer 'this.timer'");
+    expect(diagnostics).toHaveLength(0);
   });
 
   it('allows member expression cleared in a teardown method (stop)', () => {

@@ -172,4 +172,64 @@ describe('class boundary isolation for this.* resources', () => {
 
     expect(runRule(noUnclearedTimersRule, code)).toHaveLength(0);
   });
+
+  // Phase 1.5: inside a class the instance itself is the lifecycle boundary,
+  // so a constructor allocation is released by a teardown method even when its
+  // name is not one of the recognized framework hook names.
+  it.each([
+    'dispose',
+    'destroy',
+    'ngOnDestroy',
+    'disconnectedCallback',
+    'beforeUnmount',
+    'unmounted',
+    'beforeDestroy',
+    'destroyed',
+    'shutdown',
+    'stopUsingThing',
+  ])('accepts a constructor allocation cleared from %s()', (method) => {
+    const code = `
+      class Widget {
+        constructor() { this.t = setInterval(tick, 1000); }
+        ${method}() { clearInterval(this.t); }
+      }
+    `;
+
+    expect(runRule(noUnclearedTimersRule, code)).toHaveLength(0);
+  });
+
+  it('still isolates two sibling classes that both use dispose()', () => {
+    const code = `
+      class Alpha {
+        constructor() { this.t = setInterval(tick, 1000); }
+      }
+      class Beta {
+        constructor() { this.t = setInterval(tick, 1000); }
+        dispose() { clearInterval(this.t); }
+      }
+    `;
+
+    const diagnostics = runRule(noUnclearedTimersRule, code);
+
+    // Alpha has no teardown of its own, so its timer still leaks.
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0].line).toBe(3);
+  });
+
+  it('keeps nested classes isolated when the outer class has a teardown method', () => {
+    const code = `
+      class Outer {
+        constructor() { this.t = setInterval(tick, 1000); }
+        dispose() {
+          class Helper {
+            dispose() { clearInterval(this.t); }
+          }
+          return Helper;
+        }
+      }
+    `;
+
+    // Helper is a different instance, so Outer.t is never released.
+    expect(runRule(noUnclearedTimersRule, code)).toHaveLength(1);
+  });
 });
