@@ -1,10 +1,12 @@
 import fs from 'node:fs';
+import { createHash } from 'node:crypto';
 import type { Plugin, ResolvedConfig, ViteDevServer } from 'vite';
 import { createFilter } from '@rollup/pluginutils';
 import pc from 'picocolors';
 
 import type { PluginOptions } from './types/config.js';
 import type { Diagnostic } from './types/diagnostic.js';
+import type { ExtractionResult } from './types/rule.js';
 import { resolvePluginConfig } from './config/index.js';
 import { LeakDetectorEngine } from './core/engine.js';
 import { extractSource } from './core/extractors/index.js';
@@ -21,12 +23,36 @@ export function memoryLeakDetectorPlugin(options: PluginOptions = {}): Plugin {
 
   const engine = new LeakDetectorEngine(config);
 
-  // Per-file diagnostic cache, keyed by the bare physical path. In `vite dev`,
-  // Vite's own transform cache decides which files get re-analyzed; this map
-  // holds the *latest* known diagnostics so summarize/buildEnd always see the
-  // current state, whether or not Vite re-ran our transform hook.
+  // Per-environment diagnostic cache. Key is `${environmentName}::${file}`:
+  // under the Environment API a single file can be transformed once per
+  // environment (client + ssr), and collapsing them would either double-report
+  // or drop findings. When there is no environment (Vite 4/5) the name is
+  // empty and this behaves like the previous file-keyed map.
   const diagnosticMap = new Map<string, Diagnostic[]>();
   let isBuild = false;
+
+  // 3.1 `transform` and `reportChangedFile` can both fire for the same edit, so
+  // the analysis result is cached by (file, content) and reused. The cache is
+  // bounded to avoid growing for the lifetime of a long dev session.
+  const ANALYSIS_CACHE_LIMIT = 500;
+  const analysisCache = new Map<string, Diagnostic[]>();
+  const analysisCacheKey = (file: string, content: string): string =>
+    `${file}\u0000${createHash('sha1').update(content).digest('hex')}`;
+
+  function analyzeCached(file: string, code: string, extraction?: ExtractionResult): Diagnostic[] {
+    const key = analysisCacheKey(file, code);
+    const hit = analysisCache.get(key);
+    if (hit) return hit;
+
+    const diagnostics = engine.analyze(file, code, extraction);
+    if (analysisCache.size >= ANALYSIS_CACHE_LIMIT) {
+      // Drop the oldest entry; Map preserves insertion order.
+      const oldest = analysisCache.keys().next().value;
+      if (oldest !== undefined) analysisCache.delete(oldest);
+    }
+    analysisCache.set(key, diagnostics);
+    return diagnostics;
+  }
 
   // Vite's own logger, so `--logLevel` and `clearScreen` are respected. Falls
   // back to the console until `configResolved` supplies the real one.
@@ -47,6 +73,37 @@ export function memoryLeakDetectorPlugin(options: PluginOptions = {}): Plugin {
 
   const isRelevant = (id: string) => filter(normalizedIdOf(id));
 
+  /**
+   * Vite 6+ exposes the active environment on the plugin context; Vite 4/5 do
+   * not, so `undefined` degrades to a single unnamed bucket.
+   */
+  const environmentNameOf = (ctx: unknown): string => {
+    const name = (ctx as { environment?: { name?: string } } | undefined)?.environment?.name;
+    return name ?? '';
+  };
+
+  const cacheKeyOf = (ctx: unknown, file: string): string =>
+    `${environmentNameOf(ctx)}\u0000${file}`;
+
+  /**
+   * 3.3 The same file can be analyzed once per environment, which would repeat
+   * identical findings. Collapse anything that matches on file, rule and
+   * position, and drop exact duplicates outright.
+   */
+  function dedupeDiagnostics(diagnostics: Diagnostic[]): Diagnostic[] {
+    const seen = new Set<string>();
+    const out: Diagnostic[] = [];
+    for (const d of diagnostics) {
+      if (seen.has(d.fingerprint ?? '')) continue;
+      const key = `${d.file}|${d.ruleId}|${d.line}|${d.column}|${d.message}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      seen.add(d.fingerprint ?? '');
+      out.push(d);
+    }
+    return out;
+  }
+
   // --- Terminal reporting -----------------------------------------------------
   // Real-time warnings are printed from the dev-server side (handleHotUpdate +
   // debounced summaries) instead of the `transform` hook. Vite aggressively
@@ -55,6 +112,15 @@ export function memoryLeakDetectorPlugin(options: PluginOptions = {}): Plugin {
   // re-prints totals once a batch of changes settles.
   let summaryTimer: ReturnType<typeof setTimeout> | null = null;
   let printedSummaryKey = '';
+
+  // 3.2 The fingerprint set last printed per (environment, file). Several hooks
+  // can observe one edit, so without this the same report is printed twice.
+  const printedFileState = new Map<string, string>();
+  const stateOf = (diagnostics: Diagnostic[]): string =>
+    diagnostics
+      .map((d) => d.fingerprint ?? `${d.file}|${d.ruleId}|${d.line}|${d.column}|${d.message}`)
+      .sort()
+      .join('|');
 
   function scheduleFullSummary(delay = 1200) {
     if (summaryTimer) clearTimeout(summaryTimer);
@@ -71,8 +137,12 @@ export function memoryLeakDetectorPlugin(options: PluginOptions = {}): Plugin {
     const allDiagnostics = Array.from(diagnosticMap.values()).flat();
     if (allDiagnostics.length === 0) return;
 
-    const stateKey = Array.from(diagnosticMap.entries())
-      .map(([file, diags]) => `${file}:${diags.length}`)
+    // 3.6 Key on the sorted fingerprint list, not per-file counts: swapping one
+    // leak for another in the same file leaves the counts unchanged but changes
+    // the fingerprint set, so the replacement still reprints.
+    const stateKey = allDiagnostics
+      .map((d) => d.fingerprint ?? `${d.file}|${d.ruleId}|${d.line}|${d.column}|${d.message}`)
+      .sort()
       .join('|');
     if (stateKey === printedSummaryKey) return;
     printedSummaryKey = stateKey;
@@ -86,7 +156,7 @@ export function memoryLeakDetectorPlugin(options: PluginOptions = {}): Plugin {
    * `handleHotUpdate` so warnings survive cases where Vite's transform cache
    * short-circuits our transform hook.
    */
-  async function reportChangedFile(id: string) {
+  async function reportChangedFile(id: string, ctx?: unknown) {
     const normalizedId = normalizedIdOf(id);
     if (!filter(normalizedId)) return;
     if (isBuild) return;
@@ -106,19 +176,26 @@ export function memoryLeakDetectorPlugin(options: PluginOptions = {}): Plugin {
     }
     if (!extraction) return;
 
-    const diagnostics = engine.analyze(normalizedId, code, extraction);
+    const key = cacheKeyOf(ctx, normalizedId);
+    const diagnostics = analyzeCached(normalizedId, code, extraction);
     if (diagnostics.length === 0) {
-      diagnosticMap.delete(normalizedId);
+      diagnosticMap.delete(key);
+      printedFileState.delete(key);
       return;
     }
 
-    diagnosticMap.set(normalizedId, diagnostics);
+    diagnosticMap.set(key, diagnostics);
+
+    // Already reported this exact set of findings for this file.
+    const state = stateOf(diagnostics);
+    if (printedFileState.get(key) === state) return;
+    printedFileState.set(key, state);
 
     if (!hasTerminalReport()) return;
     consoleReporter(diagnostics, code, { root, write: logInfo });
   }
 
-  return {
+  const plugin: Plugin = {
     name: 'vite-plugin-memory-leak-detector',
     // 'pre' ensures we get the raw source code before transpilers like Babel or SWC mangle it
     enforce: 'pre',
@@ -142,9 +219,14 @@ export function memoryLeakDetectorPlugin(options: PluginOptions = {}): Plugin {
         const normalizedId = normalizedIdOf(path);
 
         if (event === 'unlink' || event === 'unlinkDir') {
-          // Filesystem events never carry query strings; normalize so the key
-          // matches the keys written by `transform` / `reportChangedFile`.
-          diagnosticMap.delete(normalizedId);
+          // Filesystem events never carry query strings, and carry no
+          // environment either — drop every environment's entry for the file.
+          for (const key of Array.from(diagnosticMap.keys())) {
+            if (key.endsWith(`\u0000${normalizedId}`)) diagnosticMap.delete(key);
+          }
+          for (const key of Array.from(printedFileState.keys())) {
+            if (key.endsWith(`\u0000${normalizedId}`)) printedFileState.delete(key);
+          }
         }
 
         if (isRelevant(path)) {
@@ -168,6 +250,15 @@ export function memoryLeakDetectorPlugin(options: PluginOptions = {}): Plugin {
         summaryTimer = null;
       }
       printedSummaryKey = '';
+
+      // In build/watch mode nothing clears the map between rebuilds, so entries
+      // from a previous pass would be re-reported as if still present. Dev keeps
+      // its map: there the entries are the current state of the module graph.
+      if (isBuild) {
+        diagnosticMap.clear();
+        analysisCache.clear();
+        printedFileState.clear();
+      }
     },
 
     async transform(code, id) {
@@ -182,15 +273,18 @@ export function memoryLeakDetectorPlugin(options: PluginOptions = {}): Plugin {
       const extraction = await extractSource(normalizedId, code);
       if (!extraction) return null;
 
-      const diagnostics = engine.analyze(normalizedId, code, extraction);
+      const key = cacheKeyOf(this, normalizedId);
+      const diagnostics = analyzeCached(normalizedId, code, extraction);
 
       // Update cache
       if (diagnostics.length === 0) {
-        diagnosticMap.delete(normalizedId);
+        diagnosticMap.delete(key);
+        printedFileState.delete(key);
         return null;
       }
 
-      diagnosticMap.set(normalizedId, diagnostics);
+      diagnosticMap.set(key, diagnostics);
+      printedFileState.set(key, stateOf(diagnostics));
 
       // Schedule a debounced full summary so a freshly-loaded page (or an HMR
       // refresh) prints its warnings once the module graph quiets down. Dev-only
@@ -207,9 +301,13 @@ export function memoryLeakDetectorPlugin(options: PluginOptions = {}): Plugin {
     // file whenever it changes during `vite dev` — regardless of whether the
     // transform hook fires — so memory leak warnings never disappear from the
     // terminal due to Vite caching transformed output.
+    //
+    // Vite 6+ calls `hotUpdate` (Environment API); Vite 4/5 call
+    // `handleHotUpdate`. Some versions can dispatch both for one edit, so
+    // `reportChangedFile` de-duplicates on the (file, content) hash: the second
+    // call reuses the cached analysis and finds nothing new to print.
     async handleHotUpdate(ctx) {
-      const { file } = ctx;
-      reportChangedFile(file);
+      reportChangedFile(ctx.file, this);
       return undefined;
     },
 
@@ -218,7 +316,9 @@ export function memoryLeakDetectorPlugin(options: PluginOptions = {}): Plugin {
       // Only run the heavy summary during a full build, unless the build already failed
       if (!isBuild || error) return;
 
-      const allDiagnostics = Array.from(diagnosticMap.values()).flat();
+      // Collapse per-environment duplicates so a file transformed for both
+      // client and SSR is reported (and counted toward thresholds) once.
+      const allDiagnostics = dedupeDiagnostics(Array.from(diagnosticMap.values()).flat());
 
       // Write baseline if requested
       if (config.baseline.enabled && config.baseline.update) {
@@ -286,4 +386,22 @@ export function memoryLeakDetectorPlugin(options: PluginOptions = {}): Plugin {
       }
     },
   };
+
+  // 3.2 `hotUpdate` is the Vite 6+ Environment API equivalent of
+  // `handleHotUpdate`. It is absent from the Vite 5 `Plugin` type and is never
+  // called there, so it is attached after the typed literal rather than
+  // widening the hook table to `Record<string, unknown>`.
+  (plugin as unknown as Record<string, unknown>).hotUpdate = async function hotUpdate(this: unknown, ctx: any) {
+    const files: string[] = Array.isArray(ctx?.modules)
+      ? ctx.modules.map((m: any) => m?.file ?? m?.id).filter(Boolean)
+      : ctx?.file
+        ? [ctx.file]
+        : [];
+    for (const file of files) {
+      await reportChangedFile(file, this);
+    }
+    return undefined;
+  };
+
+  return plugin;
 }

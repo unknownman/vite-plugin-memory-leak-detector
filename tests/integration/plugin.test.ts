@@ -1,5 +1,9 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join as joinPath } from 'node:path';
 import { memoryLeakDetectorPlugin } from '../../src/plugin.js';
+import { LeakDetectorEngine } from '../../src/core/engine.js';
 import * as reporterModule from '../../src/reporter/index.js';
 
 describe('memoryLeakDetectorPlugin UX and reporting', () => {
@@ -125,5 +129,202 @@ describe('memoryLeakDetectorPlugin UX and reporting', () => {
 
     consoleLogSpy.mockRestore();
     dispatchSpy.mockRestore();
+  });
+});
+describe('memoryLeakDetectorPlugin Vite integration (phase 3)', () => {
+  let tmp: string;
+  let logSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    tmp = mkdtempSync(joinPath(tmpdir(), 'mld-p3-'));
+    logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    logSpy.mockRestore();
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  const write = (name: string, code: string) => {
+    const file = joinPath(tmp, name);
+    writeFileSync(file, code, 'utf8');
+    return file;
+  };
+
+  it('analyzes a given file content only once even when several hooks see it', async () => {
+    const plugin = memoryLeakDetectorPlugin() as any;
+    plugin.configResolved({ command: 'serve' });
+    plugin.buildStart();
+
+    const file = write('once.ts', 'setInterval(() => {}, 1000);');
+    const code = readFileSync(file, 'utf8');
+    const analyzeSpy = vi.spyOn(LeakDetectorEngine.prototype, 'analyze');
+
+    const ctx = { warn: vi.fn(), error: vi.fn() };
+    await plugin.transform.call(ctx, code, file);
+    await plugin.transform.call(ctx, code, file);
+    await plugin.handleHotUpdate.call(ctx, { file, modules: [] });
+    await plugin.hotUpdate.call(ctx, { file, modules: [{ file }] });
+
+    expect(analyzeSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('prints the per-file report once when both HMR hooks fire for one edit', async () => {
+    const plugin = memoryLeakDetectorPlugin() as any;
+    plugin.configResolved({ command: 'serve' });
+    plugin.buildStart();
+
+    const file = write('hmr.ts', 'setInterval(() => {}, 1000);');
+    const ctx = { warn: vi.fn(), error: vi.fn() };
+
+    await plugin.handleHotUpdate.call(ctx, { file, modules: [] });
+    await plugin.hotUpdate.call(ctx, { file, modules: [{ file }] });
+
+    const reports = logSpy.mock.calls.map((c) => c.join(' ')).filter((m) => m.includes('hmr.ts'));
+    expect(reports).toHaveLength(1);
+  });
+
+  it('deduplicates identical findings reported by two environments', async () => {
+    const plugin = memoryLeakDetectorPlugin() as any;
+    plugin.configResolved({ command: 'build' });
+    plugin.buildStart();
+
+    const file = write('env.ts', 'setInterval(() => {}, 1000);');
+    const code = readFileSync(file, 'utf8');
+    const ctx = { warn: vi.fn(), error: vi.fn() };
+    const dispatchSpy = vi.spyOn(reporterModule, 'dispatchReports');
+
+    // Vite 6+ transforms a module once per environment.
+    await plugin.transform.call({ ...ctx, environment: { name: 'client' } }, code, file);
+    await plugin.transform.call({ ...ctx, environment: { name: 'ssr' } }, code, file);
+
+    expect(dispatchSpy).not.toHaveBeenCalled();
+    await plugin.buildEnd.call(ctx);
+
+    const reported = dispatchSpy.mock.calls[0][0] as any[];
+    const keys = reported.map((d) => `${d.file}|${d.ruleId}|${d.line}|${d.column}|${d.message}`);
+    expect(new Set(keys).size).toBe(keys.length);
+  });
+
+  it('keeps distinct findings from one environment', async () => {
+    const plugin = memoryLeakDetectorPlugin() as any;
+    plugin.configResolved({ command: 'build' });
+    plugin.buildStart();
+
+    const file = write('multi.ts', 'const id = setInterval(tick, 1000);\nconst s = setInterval(tick, 500);');
+    const code = readFileSync(file, 'utf8');
+    const ctx = { warn: vi.fn(), error: vi.fn() };
+    const dispatchSpy = vi.spyOn(reporterModule, 'dispatchReports');
+
+    await plugin.transform.call({ ...ctx, environment: { name: 'client' } }, code, file);
+    await plugin.buildEnd.call(ctx);
+
+    expect((dispatchSpy.mock.calls[0][0] as any[]).length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('clears stale diagnostics between watch rebuilds in build mode', async () => {
+    const plugin = memoryLeakDetectorPlugin() as any;
+    plugin.configResolved({ command: 'build' });
+    plugin.buildStart();
+
+    const file = write('watch.ts', 'setInterval(() => {}, 1000);');
+    const code = readFileSync(file, 'utf8');
+    const ctx = { warn: vi.fn(), error: vi.fn() };
+    const dispatchSpy = vi.spyOn(reporterModule, 'dispatchReports');
+
+    await plugin.transform.call(ctx, code, file);
+    await plugin.buildEnd.call(ctx);
+    expect((dispatchSpy.mock.calls[0][0] as any[]).length).toBe(1);
+
+    // Second rebuild after the leak was fixed.
+    plugin.buildStart();
+    const fixed = 'export const noop = 1;';
+    writeFileSync(file, fixed, 'utf8');
+    await plugin.transform.call(ctx, fixed, file);
+    await plugin.buildEnd.call(ctx);
+
+    expect((dispatchSpy.mock.calls[1][0] as any[]).length).toBe(0);
+  });
+
+  it('keeps the dev cache across buildStart so summaries stay current', async () => {
+    const plugin = memoryLeakDetectorPlugin() as any;
+    plugin.configResolved({ command: 'serve' });
+    plugin.buildStart();
+
+    const file = write('dev.ts', 'setInterval(() => {}, 1000);');
+    const ctx = { warn: vi.fn(), error: vi.fn() };
+    const analyzeSpy = vi.spyOn(LeakDetectorEngine.prototype, 'analyze');
+
+    await plugin.handleHotUpdate.call(ctx, { file, modules: [] });
+    const afterFirst = analyzeSpy.mock.calls.length;
+
+    plugin.buildStart();
+    await plugin.handleHotUpdate.call(ctx, { file, modules: [] });
+
+    // Content unchanged: served from the (surviving) analysis cache.
+    expect(analyzeSpy.mock.calls.length).toBe(afterFirst);
+  });
+
+  it('reprints the debounced summary when a leak is replaced by a different one of the same count', async () => {
+    vi.useFakeTimers();
+    const plugin = memoryLeakDetectorPlugin() as any;
+    plugin.configResolved({ command: 'serve' });
+    plugin.buildStart();
+
+    const file = write('swap.ts', 'const id = setInterval(tick, 1000);');
+    const ctx = { warn: vi.fn(), error: vi.fn() };
+    const summaryPrints = () =>
+      logSpy.mock.calls.map((c) => c.join(' ')).filter((m) => m.includes('swap.ts'));
+
+    await plugin.transform.call(ctx, readFileSync(file, 'utf8'), file);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(summaryPrints()).toHaveLength(1);
+
+    // Same file, same diagnostic count, different leak -> different fingerprint.
+    writeFileSync(file, 'const id = setInterval(tick, 2000);', 'utf8');
+    await plugin.transform.call(ctx, readFileSync(file, 'utf8'), file);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(summaryPrints()).toHaveLength(2);
+
+    // Re-analyzing identical content must not reprint.
+    await plugin.transform.call(ctx, readFileSync(file, 'utf8'), file);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(summaryPrints()).toHaveLength(2);
+  });
+
+  it('does not reprint the summary when nothing changed', async () => {
+    vi.useFakeTimers();
+    const plugin = memoryLeakDetectorPlugin() as any;
+    plugin.configResolved({ command: 'serve' });
+    plugin.buildStart();
+
+    const file = write('stable.ts', 'const id = setInterval(tick, 1000);');
+    const ctx = { warn: vi.fn(), error: vi.fn() };
+    const summaryPrints = () =>
+      logSpy.mock.calls.map((c) => c.join(' ')).filter((m) => m.includes('stable.ts'));
+
+    await plugin.transform.call(ctx, readFileSync(file, 'utf8'), file);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(summaryPrints()).toHaveLength(1);
+
+    await plugin.transform.call(ctx, readFileSync(file, 'utf8'), file);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(summaryPrints()).toHaveLength(1);
+  });
+
+  it('uses the Vite logger instead of the console once the config is resolved', async () => {
+    const info = vi.fn();
+    const plugin = memoryLeakDetectorPlugin() as any;
+    plugin.configResolved({ command: 'build', logger: { info, warn: vi.fn(), error: vi.fn() } });
+    plugin.buildStart();
+
+    const ctx = { warn: vi.fn(), error: vi.fn() };
+    await plugin.transform.call(ctx, 'setInterval(() => {}, 1000);', write('log.ts', 'setInterval(() => {}, 1000);'));
+    await plugin.buildEnd.call(ctx);
+
+    expect(info).toHaveBeenCalled();
+    expect(logSpy).not.toHaveBeenCalled();
   });
 });
