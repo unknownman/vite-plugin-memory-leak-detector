@@ -122,7 +122,12 @@ export const reactUseEffectCleanupRule: RuleDefinition = {
   id: 'react/react-useeffect-cleanup',
   description: 'Checks if React effect hooks (useEffect or any hook ending in Effect) create subscriptions, timers, or controllers but lack a cleanup function.',
   category: 'react',
-  defaultSeverity: 'error',
+  // `warn`, not `error`: this rule is a heuristic that fires on idiomatic React
+  // patterns (a bare `el.addEventListener` inside an effect, a store subscription
+  // the effect never tears down). Defaulting it to `error` fails builds for
+  // correct code. Projects that want it gating can raise it per rule:
+  //   rules: { 'react/react-useeffect-cleanup': 'error' }
+  defaultSeverity: 'warn',
   triggers: [
     'useEffect',
   ],
