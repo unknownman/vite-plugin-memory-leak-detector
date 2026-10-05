@@ -7,6 +7,9 @@ import { CommentDirectivesHandler } from './comments.js';
 import { BaselineManager, generateFingerprint, normalizeSnippet } from './baseline.js';
 import { IgnoreManager } from './ignore.js';
 
+/** Signature shared by every entry of a `RuleVisitor`, enter or `:exit`. */
+type RuleVisitorFn = (node: any, parent: any, ancestors?: any[]) => void;
+
 export class LeakDetectorEngine {
   private config: ResolvedPluginConfig;
   private commentHandler: CommentDirectivesHandler;
@@ -20,6 +23,14 @@ export class LeakDetectorEngine {
    * directory the CLI happened to run in.
    */
   private root: string = process.cwd();
+
+  /** Cached union of `RuleDefinition.triggers` for the currently enabled rules. */
+  private activeTriggerCache?: {
+    rules: number;
+    frameworks: ResolvedPluginConfig['frameworks'];
+    customRules: number;
+    triggers: Set<string>;
+  };
 
   constructor(config: ResolvedPluginConfig) {
     this.config = config;
@@ -60,6 +71,62 @@ export class LeakDetectorEngine {
     return this.baselineManager;
   }
 
+  /**
+   * True when at least one enabled rule's triggers appear in `source`.
+   *
+   * The trigger set is cached because it only changes when the configured rule
+   * list does, and it is rebuilt on demand so mutating `config.customRules`
+   * (the plugin appends the built-ins to it) stays correct.
+   */
+  private mightContainLeak(source: string): boolean {
+    const triggers = this.getActiveTriggers();
+    if (triggers === null) return true;
+    for (const trigger of triggers) {
+      if (source.includes(trigger)) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Union of the triggers of every rule that survived category and severity
+   * filtering. Returns `null` when a rule has no `triggers` array, which forces
+   * the caller down the full-parse path: a rule that cannot describe its own
+   * requirements must never be silently skipped.
+   */
+  private getActiveTriggers(): Set<string> | null {
+    const cache = this.activeTriggerCache;
+    if (
+      cache &&
+      cache.rules === this.rules.length &&
+      cache.frameworks === this.config.frameworks &&
+      cache.customRules === this.config.customRules.length
+    ) {
+      return cache.triggers;
+    }
+
+    const triggers = new Set<string>();
+    for (const rule of this.rules) {
+      if (
+        this.config.frameworks !== 'auto' &&
+        rule.category !== 'generic' &&
+        !this.config.frameworks.includes(rule.category as any)
+      ) {
+        continue;
+      }
+      if (this.resolveSeverity(rule.id) === 'off') continue;
+      if (!Array.isArray(rule.triggers) || rule.triggers.length === 0) return null;
+      for (const trigger of rule.triggers) triggers.add(trigger);
+    }
+
+    this.activeTriggerCache = {
+      rules: this.rules.length,
+      frameworks: this.config.frameworks,
+      customRules: this.config.customRules.length,
+      triggers,
+    };
+    return triggers;
+  }
+
   public analyze(file: string, code: string, extraction?: ExtractionResult): Diagnostic[] {
     const diagnostics: Diagnostic[] = [];
 
@@ -70,6 +137,15 @@ export class LeakDetectorEngine {
 
     const scriptCode = extraction ? extraction.code : code;
     if (scriptCode.trim() === '') return diagnostics;
+
+    // 4.2 Prefilter: a module that allocates nothing cannot produce a leak, so
+    // it never needs to be parsed. Every enabled rule declares the identifiers
+    // it inspects (`RuleDefinition.triggers`); if none of them appears anywhere
+    // in the source, bail out before building an AST. This is a substring scan
+    // over the raw text — far cheaper than `oxc-parser`, and the dominant cost
+    // for the large files (generated bundles, lockfiles, style-heavy views)
+    // that make up most of a real project's module graph.
+    if (!this.mightContainLeak(scriptCode)) return diagnostics;
 
     const parseFilename =
       extraction?.inferredExtension ? `${file}.${extraction.inferredExtension}` : file;
@@ -177,23 +253,39 @@ export class LeakDetectorEngine {
 
     if (activeVisitors.length === 0) return diagnostics;
 
+    // 4.3 Visitor map: one lookup per node instead of a per-rule property
+    // probe. Previously every node walked every rule's visitor object, so
+    // traversal cost was O(nodes x rules) even though only a handful of
+    // (rule, nodeType) pairs are ever live. Building this map is
+    // O(sum of each rule's handler count), and the walk becomes
+    // O(nodes + handler invocations).
+    const enterMap = new Map<string, RuleVisitorFn[]>();
+    const exitMap = new Map<string, RuleVisitorFn[]>();
+    for (const { visitor } of activeVisitors) {
+      for (const key of Object.keys(visitor)) {
+        const handler = visitor[key];
+        if (typeof handler !== 'function') continue;
+        const isExit = key.endsWith(':exit');
+        const nodeType = isExit ? key.slice(0, -5) : key;
+        const target = isExit ? exitMap : enterMap;
+        const bucket = target.get(nodeType);
+        if (bucket) bucket.push(handler);
+        else target.set(nodeType, [handler]);
+      }
+    }
+
     // Single-pass AST Traversal
     const ancestors: any[] = [];
     walk(ast, {
       enter(node: any, parent: any) {
-        for (const { visitor } of activeVisitors) {
-          const handler = visitor[node.type];
-          if (handler) handler(node, parent, ancestors);
-        }
+        const handlers = enterMap.get(node.type);
+        if (handlers) for (const handler of handlers) handler(node, parent, ancestors);
         ancestors.push(node);
       },
       leave(node: any, parent: any) {
         ancestors.pop();
-        const exitKey = `${node.type}:exit`;
-        for (const { visitor } of activeVisitors) {
-          const handler = visitor[exitKey];
-          if (handler) handler(node, parent, ancestors);
-        }
+        const handlers = exitMap.get(node.type);
+        if (handlers) for (const handler of handlers) handler(node, parent, ancestors);
       },
     });
 

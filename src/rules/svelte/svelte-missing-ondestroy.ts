@@ -67,6 +67,10 @@ export const svelteMissingOnDestroyRule: RuleDefinition = {
   description: 'Checks if subscriptions are created in Svelte component scope without being cleared in onDestroy.',
   category: 'svelte',
   defaultSeverity: 'error',
+  triggers: [
+    'setInterval',
+    'addEventListener',
+  ],
 
   create(context: RuleContext) {
     const tracker = new ScopeTracker();

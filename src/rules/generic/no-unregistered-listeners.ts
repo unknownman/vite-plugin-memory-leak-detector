@@ -22,6 +22,9 @@ export const noUnregisteredListenersRule: RuleDefinition = {
   description: 'Detects addEventListener calls without matching removeEventListener for the same handler.',
   category: 'generic',
   defaultSeverity: 'warn',
+  triggers: [
+    'addEventListener',
+  ],
 
   create(context: RuleContext) {
     const tracker = new ScopeTracker();

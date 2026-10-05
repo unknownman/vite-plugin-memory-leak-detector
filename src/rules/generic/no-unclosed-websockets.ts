@@ -7,6 +7,10 @@ export const noUnclosedWebsocketsRule: RuleDefinition = {
   description: 'Detects WebSocket or EventSource instantiations without a corresponding .close() call.',
   category: 'generic',
   defaultSeverity: 'warn',
+  triggers: [
+    'WebSocket',
+    'EventSource',
+  ],
 
   create(context: RuleContext) {
     const tracker = new ScopeTracker();

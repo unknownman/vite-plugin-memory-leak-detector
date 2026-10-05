@@ -123,6 +123,9 @@ export const reactUseEffectCleanupRule: RuleDefinition = {
   description: 'Checks if React effect hooks (useEffect or any hook ending in Effect) create subscriptions, timers, or controllers but lack a cleanup function.',
   category: 'react',
   defaultSeverity: 'error',
+  triggers: [
+    'useEffect',
+  ],
 
   create(context: RuleContext) {
     const tracker = new ScopeTracker();

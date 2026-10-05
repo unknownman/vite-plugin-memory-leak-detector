@@ -38,5 +38,21 @@ export interface RuleDefinition {
   description: string;
   category: 'generic' | 'react' | 'vue' | 'svelte' | 'solid';
   defaultSeverity: Severity;
+  /**
+   * Substrings that must all be absent from a source file for this rule to be
+   * certain it cannot report anything. List the identifiers a report *cannot*
+   * exist without — not every identifier the rule reads.
+   *
+   * A file is prefiltered against the union of the enabled rules' triggers
+   * before it is parsed, so a module that allocates nothing never reaches the
+   * parser. Every identifier a rule inspects — the allocating call/constructor
+   * *and* the lifecycle or teardown names it treats as a cleanup — must be
+   * listed. A missing trigger silently disables a rule for the files that do
+   * contain its pattern, so keep these in sync with the rule body.
+   *
+   * Rule categories still apply on top: this is only a cheap string check, not
+   * a replacement for category filtering.
+   */
+  triggers: string[];
   create(context: RuleContext): RuleVisitor;
 }

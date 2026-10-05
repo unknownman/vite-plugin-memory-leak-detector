@@ -7,6 +7,12 @@ export const noUnconnectedObserversRule: RuleDefinition = {
   description: 'Detects Observers that are instantiated but whose specific instance is never disconnected.',
   category: 'generic',
   defaultSeverity: 'warn',
+  triggers: [
+    'IntersectionObserver',
+    'MutationObserver',
+    'ResizeObserver',
+    'PerformanceObserver',
+  ],
 
   create(context: RuleContext) {
     const tracker = new ScopeTracker();

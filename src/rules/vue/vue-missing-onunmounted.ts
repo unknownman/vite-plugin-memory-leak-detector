@@ -129,6 +129,11 @@ export const vueMissingOnUnmountedRule: RuleDefinition = {
   description: 'Checks if subscriptions are created in Vue setup scope without being cleared in onUnmounted.',
   category: 'vue',
   defaultSeverity: 'error',
+  triggers: [
+    'setInterval',
+    'addEventListener',
+    'subscribe',
+  ],
 
   create(context: RuleContext) {
     const tracker = new ScopeTracker();

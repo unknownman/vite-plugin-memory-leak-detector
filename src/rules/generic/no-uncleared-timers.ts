@@ -7,6 +7,11 @@ export const noUnclearedTimersRule: RuleDefinition = {
   description: 'Detects setInterval calls whose tracking variable is never cleared.',
   category: 'generic',
   defaultSeverity: 'warn',
+  // `setTimeout` is deliberately not a trigger: `Program:exit` skips it
+  // (a one-shot timer cannot leak), so it only ever appears as a clearance.
+  triggers: [
+    'setInterval',
+  ],
 
   create(context: RuleContext) {
     const tracker = new ScopeTracker();

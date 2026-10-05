@@ -7,6 +7,9 @@ export const noUnclearedAnimationFramesRule: RuleDefinition = {
   description: 'Detects requestAnimationFrame calls whose tracking variable is never canceled.',
   category: 'generic',
   defaultSeverity: 'warn',
+  triggers: [
+    'requestAnimationFrame',
+  ],
 
   create(context: RuleContext) {
     const tracker = new ScopeTracker();

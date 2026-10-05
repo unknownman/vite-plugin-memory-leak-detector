@@ -7,6 +7,9 @@ export const noMissingAbortControllerRule: RuleDefinition = {
   description: 'Detects AbortController instantiations where .abort() is never called.',
   category: 'generic',
   defaultSeverity: 'warn',
+  triggers: [
+    'AbortController',
+  ],
 
   create(context: RuleContext) {
     const tracker = new ScopeTracker();

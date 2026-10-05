@@ -7,6 +7,10 @@ export const noUnsubscribedEventsRule: RuleDefinition = {
   description: 'Detects reactive subscriptions (.subscribe / .on) without unsubscribe.',
   category: 'generic',
   defaultSeverity: 'warn',
+  triggers: [
+    'subscribe',
+    '.on(',
+  ],
 
   create(context: RuleContext) {
     const tracker = new ScopeTracker();

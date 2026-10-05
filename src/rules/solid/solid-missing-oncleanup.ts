@@ -63,6 +63,10 @@ export const solidMissingOnCleanupRule: RuleDefinition = {
   description: 'Checks if subscriptions are created in Solid component scope without being cleared in onCleanup.',
   category: 'solid',
   defaultSeverity: 'error',
+  triggers: [
+    'setInterval',
+    'addEventListener',
+  ],
 
   create(context: RuleContext) {
     const tracker = new ScopeTracker();
