@@ -184,6 +184,18 @@ Because the plugin uses static analysis (AST), it doesn't execute your code. If 
 - **Turn off per-file**: Use `// memory-leak-ignore-file` at the top of a file.
 - **Turn off per-rule**: Set `rules: { 'generic/no-uncleared-timers': 'off' }` in the plugin config.
 
+### The React effect rule is noisy. What severity does it use?
+
+`react/react-useeffect-cleanup` defaults to `'warn'`, like every other built-in rule. It is a heuristic — a bare `el.addEventListener` inside an effect, or a store subscription the effect never tears down, is idiomatic React — so it is not an error by default. Raise it in your own config if you want it to gate:
+
+```typescript
+memoryLeakDetector({
+  rules: { 'react/react-useeffect-cleanup': 'error' }
+})
+```
+
+A `setTimeout` inside `useEffect` is never reported: a one-shot timer has nothing to clean up.
+
 ### How do I silence a specific pattern project-wide?
 
 Set its severity to `'off'` in the `rules` config:
@@ -196,11 +208,32 @@ memoryLeakDetector({
 
 ### Will this slow down my Vite dev server?
 
-Almost undetectably. The plugin uses `oxc-parser` (written in Rust), the fastest JavaScript parser available. It also leverages Vite's transform cache, so only files that actually change during HMR are re-analyzed.
+Almost undetectably. Three things keep it cheap:
+
+- **Most files are never parsed.** Every rule declares the identifiers it looks for (`triggers`). If a file contains none of them, it is skipped before `oxc-parser` runs at all. On a benchmark of 300 leak-free modules with all 11 rules enabled, this cut analysis from ~137 ms to ~0.4 ms.
+- **Each file is analyzed once.** Results are cached by path and content hash, so a single edit is not re-analyzed by several Vite hooks.
+- **One traversal for all rules.** Visitors are indexed by node type, so the walk is not `O(nodes x rules)`.
+
+`oxc-parser` is written in Rust, and analysis results are cached across HMR updates, so only files you actually change are re-analyzed.
 
 ### How does the baseline system work?
 
-The baseline stores a SHA-256 fingerprint of each known issue (derived from `ruleId + file + message`, independent of line numbers). When the plugin runs, any issue whose fingerprint is in the baseline is suppressed. If a developer introduces a *new* leak (a fingerprint not in the baseline), it's reported normally.
+The baseline stores a fingerprint of each known issue. When the plugin runs, any issue whose fingerprint is already in the baseline is suppressed, so a new leak fails the build while grandfathered ones stay quiet.
+
+The fingerprint is derived from `ruleId + project-relative file path + the source line of the leak + which occurrence it is on that line` — deliberately **not** from the line number and **not** from the message text. That means:
+
+- inserting or deleting code above a known leak does not resurrect it;
+- two separate leaks of the same variable in one file stay separate entries, so adding a second one *is* reported;
+- renaming the variable is reported as a new leak;
+- re-wording a rule's message does not invalidate the whole baseline.
+
+Files are stored relative to the Vite `root`, so the same baseline works across machines and CI checkout paths.
+
+> **Baseline format v2.** The fingerprint algorithm changed, so baselines written by 1.0.x no longer match. They still load — matching falls back to the old `ruleId + file + message` hash — but the plugin prints a one-time warning. **Regenerate** for the precise behaviour:
+>
+> ```bash
+> # set baseline: { path: '.leak-baseline.json', update: true }, run a build, then revert
+> ```
 
 To update the baseline: set `baseline.update: true` in your config, run a build, then commit the resulting JSON file and revert `update: true`.
 
@@ -248,6 +281,11 @@ const customIndexDBRule: RuleDefinition = {
   description: 'Ensure databases are closed.',
   category: 'generic',
   defaultSeverity: 'error',
+  // Required. The file is not even parsed unless the source contains one of
+  // these substrings, so list every identifier your rule reports on. Teardown
+  // names usually don't belong: a rule only inspects a cleanup *after* it has
+  // seen an allocation. Use `triggers: []` to opt out of prefiltering.
+  triggers: ['indexedDB.open', 'indexedDB.deleteDatabase'],
 
   create(context) {
     let dbOpened = false;
@@ -303,6 +341,8 @@ npm run test:watch
 npm run test:coverage
 ```
 
+CI runs the suite on Node 18, 20, 22 and 24, and separately against Vite 4, 5, 6, 7 and 8, since the plugin supports each of those majors as a peer. A `package` job also asserts that `npm pack` produces nothing but publishable files.
+
 ## Security
 
 `vite-plugin-memory-leak-detector` is a **static analysis tool**.
@@ -317,9 +357,15 @@ All AST parsing is done locally using `oxc-parser`.
 
 Adding AST analysis to a bundler can sometimes slow down development. We engineered this plugin to have an imperceptible footprint:
 
-1. **Rust Parser**: We use `oxc-parser`, which is drastically faster than Babel or Acorn.
-2. **Vite Cache**: During `vite dev`, the plugin leverages Vite's internal module cache. It only re-analyzes files that you actually modify and save.
-3. **Single-Pass Traversal**: Whether you have 2 rules enabled or 50, the `estree-walker` engine only traverses the AST of a file exactly *once*, executing all rules simultaneously.
+1. **Prefilter before parsing**: each rule declares the identifiers it can possibly report on (`triggers`). A file containing none of them is never handed to the parser. This is the single biggest win, because most files in a real app allocate nothing.
+2. **Rust Parser**: `oxc-parser` is drastically faster than Babel or Acorn, and line/column numbers are only computed for nodes a rule actually reports on.
+3. **Analyze once per edit**: results are cached by path and content hash. Vite can hand the same edit to several hooks (`transform`, `handleHotUpdate`, `hotUpdate`, the watcher), and the plugin re-analyzes and re-prints only once.
+4. **Single-pass traversal**: whether you have 2 rules enabled or 50, the AST is walked exactly *once*. Visitors are indexed by node type, so the cost is `O(nodes + handler calls)`, not `O(nodes x rules)`.
+5. **Environment-aware state**: under Vite 6+ a module is transformed once per environment (client, ssr). Results are tracked per environment and de-duplicated before reporting, so one leak is counted once.
+
+Run the benchmark yourself with `npx tsx benchmarks/phase4.ts`.
+
+Reproduce the numbers above on 300 leak-free modules plus 20 leaky ones (397 kB, all 11 rules): prefilter off ~137 ms, prefilter on ~0.4 ms; traversal alone ~6.8 ms to ~5.5 ms. See [`benchmarks/phase4.ts`](benchmarks/phase4.ts).
 
 ## License
 

@@ -1,0 +1,110 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: Typecheck / test / build — Node ${{ matrix.node }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [18, 20, 22, 24]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+
+  vite-compat:
+    name: Vite ${{ matrix.vite }} on Node ${{ matrix.node }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Only combinations Vite itself supports. vite 7/8 require Node
+        # ^20.19.0 || >=22.12.0; vite 4/5/6 support Node 18.
+        include:
+          - { vite: '4', node: '18' }
+          - { vite: '4', node: '22' }
+          - { vite: '5', node: '18' }
+          - { vite: '5', node: '22' }
+          - { vite: '6', node: '18' }
+          - { vite: '6', node: '20' }
+          - { vite: '6', node: '22' }
+          - { vite: '7', node: '22' }
+          - { vite: '7', node: '24' }
+          - { vite: '8', node: '22' }
+          - { vite: '8', node: '24' }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - run: npm ci
+
+      # Swaps only Vite. Vitest keeps its own bundled copy, so this isolates the
+      # plugin's own compatibility with each Vite major (its types and hooks).
+      - name: Install Vite ${{ matrix.vite }}
+        run: npm install --no-save --no-package-lock vite@${{ matrix.vite }}
+
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+
+  package:
+    name: Verify published package contents
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+      - run: npm run build
+
+      # Guards against committing build artifacts (a stale `npm pack` tarball,
+      # dist/, coverage/) that would otherwise ship or confuse `npm publish`.
+      - name: npm pack --dry-run
+        run: npm pack --dry-run
+
+      - name: Check the tarball only contains published files
+        run: |
+          set -euo pipefail
+          listing="$(npm pack --dry-run --json)"
+          echo "$listing" | node -e '
+            let raw = "";
+            process.stdin.on("data", (d) => (raw += d));
+            process.stdin.on("end", () => {
+              const files = JSON.parse(raw)[0].files.map((f) => f.path);
+              // npm always injects package.json; `files` adds the rest.
+              const allowed = /^(package\.json$|dist\/|README\.md$|CHANGELOG\.md$|LICENSE$)/;
+              const bad = files.filter((f) => !allowed.test(f));
+              if (bad.length) {
+                console.error("Unexpected files in package:\n  " + bad.join("\n  "));
+                process.exit(1);
+              }
+              console.log("package contains " + files.length + " files, all publishable");
+            });
+          '

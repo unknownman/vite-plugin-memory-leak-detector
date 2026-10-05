@@ -59,6 +59,20 @@ export const myNewRule: RuleDefinition = {
   category: 'generic', // or 'react', 'vue', 'svelte', 'solid'
   defaultSeverity: 'warn',
 
+  // REQUIRED. A source file is skipped before parsing unless it contains at
+  // least one trigger of some enabled rule, so list every identifier this rule
+  // can report on. Two rules of caution:
+  //
+  //  1. List only what a report *cannot exist without*. Rules inspect a
+  //     clearance (clearInterval, onUnmounted, off) only after they have seen an
+  //     allocation, so those names add no coverage.
+  //  2. Keep them specific. A bare 'on' is a substring of `const` and 'off' of
+  //     `offset`, which would make the prefilter match nearly every file.
+  //
+  // Use `triggers: []` if the rule genuinely cannot be described this way; it
+  // will then always be parsed.
+  triggers: ['setInterval'],
+
   create(context: RuleContext) {
     return {
       CallExpression(node: any) {
@@ -141,5 +155,34 @@ Add your rule to the appropriate table in `README.md` and update `CHANGELOG.md`.
 - Keep PRs focused on a single feature or bug fix.
 - Ensure all tests pass: `npm test`
 - Ensure TypeScript compiles: `npm run typecheck`
+- Ensure the package builds: `npm run build`
 - Add tests for any new behavior or bug fixes.
 - Update README and CHANGELOG for user-facing changes.
+
+### Step 5: Check the compatibility surface
+
+`package.json` declares `vite` as a peer dependency across Vite 4–8, and CI runs
+the suite against each of them. The plugin also supports two generations of
+dev-server hooks, so confirm your change works on both:
+
+| | Vite 4 / 5 | Vite 6 / 7 / 8 |
+|---|---|---|
+| HMR hook | `handleHotUpdate` | `handleHotUpdate` **and** `hotUpdate` |
+| Environment | none | `this.environment.name` |
+
+To reproduce a matrix leg locally:
+
+```bash
+npm install --no-save --no-package-lock vite@6
+npm run typecheck && npm test && npm run build
+```
+
+If you touched the parser, the visitor map or the prefilter, run the benchmark
+and include the numbers in your PR description:
+
+```bash
+npx tsx benchmarks/phase4.ts
+```
+
+Never claim support for a Vite major you have not actually run the suite
+against.
