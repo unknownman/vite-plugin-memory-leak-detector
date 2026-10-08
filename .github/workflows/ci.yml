@@ -70,6 +70,40 @@ jobs:
       - run: npm test
       - run: npm run build
 
+  multi-env:
+    name: Multi-environment builds — Vite ${{ matrix.vite }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The multi-env test skips itself on Vite < 6, so the guard step below
+        # also fails the job if it silently skips instead of running.
+        vite: ['6', '7', '8']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Install Vite ${{ matrix.vite }}
+        run: npm install --no-save --no-package-lock vite@${{ matrix.vite }}
+
+      - name: Run the multi-env test
+        shell: bash
+        run: set -o pipefail && npx vitest run tests/integration/multi-env.test.ts --reporter=basic | tee multi-env.log
+
+      - name: Assert the test actually ran (not skipped)
+        run: |
+          if ! grep -q "1 passed" multi-env.log; then
+            echo "multi-env test skipped or failed on Vite ${{ matrix.vite }}"
+            cat multi-env.log
+            exit 1
+          fi
+
   package:
     name: Verify published package contents
     runs-on: ubuntu-latest

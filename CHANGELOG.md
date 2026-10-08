@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-10-08
+
 ### Breaking
 
 - **Custom rules must declare `triggers`.** `RuleDefinition` gained a required
@@ -84,6 +86,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `if (ready) { clearInterval(id) } else { clearInterval(other) }` are recognized
   as self-guards; a clearance in an unreachable branch no longer suppresses a
   report, and `useEffect` bodies wrapped in a guard are no longer skipped.
+- **Method-style teardown guards.** `id && clearInterval(id)`,
+  `ready && obj.stop()` and other method callees in a short-circuit `&&`
+  are recognized as clearances (they were only detected as call arguments
+  or bare statements before).
+- **Wildcard visitor dispatch.** Rules declaring `'*'` / `'*:exit'` visitors
+  (or their own `ReturnStatement` handler) are no longer dropped; branch
+  tracking for ternaries and non-block `if` bodies now runs through the
+  wildcard hook instead of a wrapper that overwrote the rule's own visitor.
+  Self-guard detection also rejects clearances in a ternary's *alternate*
+  branch, matching the `if/else` behavior.
+- **`react/react-useeffect-cleanup` prefilter trigger widened** from
+  `useEffect` to `Effect`, so files that only use `useLayoutEffect` or
+  `useInsertionEffect` reach the rule.
+- **Multi-environment builds are reported cumulatively.** `buildStart` now
+  clears only the current environment's cached diagnostics, so a `vite build`
+  that runs both client and ssr environments no longer loses the first
+  environment's findings when the second starts. The dev summary also
+  deduplicates by fingerprint, so the same file seen from client and ssr
+  environments prints once.
+- **Missing environment is canonicalized to `client`.** Vite 5 (and hooks
+  without an Environment API context) no longer create a second, unnamed
+  state bucket alongside `client`.
+- **Baseline snippets normalize more aggressively.** String and template
+  literal contents collapse to empty and numeric literals to `0`, so changing
+  a delay, URL or event name does not orphan a baseline entry. Occurrence
+  indices are now assigned before any suppression (rule off, ignore comment,
+  baseline), so adding an ignore comment no longer re-keys the surviving
+  leak's fingerprint. Baseline version checks compare majors numerically
+  (`10.0.0` no longer reads as "older than 2.0.0") and a single fingerprint
+  set serves both v1 and v2 matching.
 - **`setTimeout` is not a leak.** One-shot timers are excluded from
   `generic/no-uncleared-timers` and from `react/react-useeffect-cleanup`.
 
@@ -93,9 +125,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   parsed. Roughly 340x faster on leak-free modules in the bundled benchmark.
 - **Visitor map.** Rule visitors are indexed by node type, so the traversal is
   `O(nodes + handler calls)` rather than `O(nodes x rules)`.
-- **Benchmark** (`benchmarks/phase4.ts`, `npx tsx benchmarks/phase4.ts`).
-- **CI**: Node 18/20/22/24 plus a Vite 4/5/6/7/8 compatibility matrix, and a job
-  asserting the published tarball contains nothing but publishable files.
+- **Benchmark** (`benchmarks/phase4.ts`, `npx tsx benchmarks/phase4.ts`),
+  including a case where 30% of leak-free modules contain a trigger and must
+  be parsed anyway.
+- **CI**: Node 18/20/22/24, a Vite 4/5/6/7/8 compatibility matrix, a job that
+  runs the multi-environment build test on Vite 6/7/8 and fails if it
+  silently skips, and a job asserting the published tarball contains nothing
+  but publishable files.
+- **Verbose warning for `triggers: []`.** A custom rule that disables the
+  parser prefilter now logs a one-time warning identifying the rule when
+  `verbose` is enabled.
 
 ### Removed
 

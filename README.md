@@ -33,6 +33,37 @@ yarn add vite-plugin-memory-leak-detector -D
 
 ---
 
+## Upgrading from 1.x to 2.0.0
+
+Version 2.0.0 changes how findings are fingerprinted and reported:
+
+- **Regenerate your baseline.** The fingerprint now includes a normalized
+  source snippet and an occurrence index, so two leaks of the same variable in
+  one file are tracked separately. v1 baseline files still suppress what they
+  recorded (with a one-time console warning), but entries will drift as you
+  edit — run once with `baseline: { update: true }` and commit the result:
+
+  ```typescript
+  memoryLeakDetector({ baseline: { path: '.leak-baseline.json', update: true } })
+  ```
+
+- **Custom rules must declare `triggers`.** The new parser prefilter skips any
+  file that contains none of the enabled rules' trigger substrings. Declare the
+  identifiers a report cannot exist without, or pass `triggers: []` to opt out
+  (this disables the prefilter for the whole engine).
+
+- **Paths resolve against the Vite project root**, not `process.cwd()`. If you
+  ran Vite from a different directory than your project root, move
+  `reports.outputDir` and `baseline.path` targets accordingly.
+
+- **`react/react-useeffect-cleanup` now defaults to `warn`.** Set
+  `rules: { 'react/react-useeffect-cleanup': 'error' }` to keep the old
+  build-failing behavior.
+
+No option was removed; every 1.x configuration still parses.
+
+---
+
 ## Recommended Configurations
 
 Choose the setup that best fits your team's workflow.
