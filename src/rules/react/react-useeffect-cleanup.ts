@@ -128,8 +128,13 @@ export const reactUseEffectCleanupRule: RuleDefinition = {
   // correct code. Projects that want it gating can raise it per rule:
   //   rules: { 'react/react-useeffect-cleanup': 'error' }
   defaultSeverity: 'warn',
+  // A report requires an effect-hook call, and `isEffectHook` matches
+  // `/^use.*Effect$/i` — so the substring `Effect` must occur in any file this
+  // rule can report on. The full hook names (`useEffect`, `useLayoutEffect`,
+  // `useIsomorphicLayoutEffect`, ...) all contain it; the literal `useEffect`
+  // does not, because `useLayoutEffect` does not contain it.
   triggers: [
-    'useEffect',
+    'Effect',
   ],
 
   create(context: RuleContext) {

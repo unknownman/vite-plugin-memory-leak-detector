@@ -17,6 +17,8 @@ vi.mock('../../src/core/parser.js', async (importOriginal) => {
 const { LeakDetectorEngine } = await import('../../src/core/engine.js');
 const { resolvePluginConfig } = await import('../../src/config/index.js');
 const { builtinRules } = await import('../../src/rules/index.js');
+const { reactUseEffectCleanupRule } = await import('../../src/rules/react/react-useeffect-cleanup.js');
+const { vueMissingOnUnmountedRule } = await import('../../src/rules/vue/vue-missing-onunmounted.js');
 
 function makeEngine(rules: RuleDefinition[] = builtinRules, extra: Record<string, unknown> = {}) {
   return new LeakDetectorEngine(
@@ -129,6 +131,56 @@ describe('parser prefilter', () => {
     for (const [file, code] of cases) {
       expect(engine.analyze(file, code).length, file).toBeGreaterThan(0);
     }
+  });
+
+  it('reports effect hooks that do not literally contain "useEffect"', () => {
+    const engine = makeEngine([reactUseEffectCleanupRule]);
+    const hooks = ['useLayoutEffect', 'useIsomorphicLayoutEffect', 'useUpdateEffect'];
+
+    for (const hook of hooks) {
+      const code = `${hook}(() => { el.addEventListener("click", onClick); }, []);`;
+      const diagnostics = engine.analyze(`/app/src/${hook}.tsx`, code);
+      expect(
+        diagnostics.map((d) => d.ruleId),
+        hook
+      ).toContain('react/react-useeffect-cleanup');
+      expect(parseCalls, hook).toContain(`/app/src/${hook}.tsx`);
+    }
+  });
+
+  it('skips a file with no effect hook even when other triggers occur', () => {
+    const engine = makeEngine([reactUseEffectCleanupRule]);
+    const code = 'const id = setInterval(tick, 1000); clearInterval(id);';
+
+    expect(engine.analyze('/app/src/no-effect.ts', code)).toHaveLength(0);
+    expect(parseCalls).toHaveLength(0);
+  });
+
+  it('parses and reports files that only use useLayoutEffect', () => {
+    const engine = makeEngine([reactUseEffectCleanupRule]);
+    const code = 'useLayoutEffect(() => { const id = setInterval(tick, 1000); }, []);';
+
+    const diagnostics = engine.analyze('/app/src/layout.tsx', code);
+    expect(diagnostics.map((d) => d.ruleId)).toContain('react/react-useeffect-cleanup');
+    expect(parseCalls).toHaveLength(1);
+  });
+
+  it('skips a file that only contains a trigger no report can come from', () => {
+    // The vue rule never reports on `.on(...)` subscriptions — its detection
+    // only matches setInterval / addEventListener / subscribe — so `.on(`
+    // must not be part of its trigger set.
+    const engine = makeEngine([vueMissingOnUnmountedRule]);
+
+    expect(engine.analyze('/app/src/sub-only.ts', "store.on('change', cb);")).toHaveLength(0);
+    expect(parseCalls).toHaveLength(0);
+  });
+
+  it('parses a file the vue rule can actually report on', () => {
+    const engine = makeEngine([vueMissingOnUnmountedRule]);
+
+    const diagnostics = engine.analyze('/app/src/setup.ts', 'const id = setInterval(tick, 1000);');
+    expect(diagnostics.map((d) => d.ruleId)).toContain('vue/missing-onunmounted');
+    expect(parseCalls).toHaveLength(1);
   });
 
   it('skips rules whose trigger is absent without disabling the rest', () => {
