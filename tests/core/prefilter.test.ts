@@ -227,6 +227,69 @@ describe('parser prefilter', () => {
     );
   });
 
+  it('warns once in verbose mode when a rule disables the prefilter with triggers: []', () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const undeclared: RuleDefinition = {
+      id: 'test/untriggered-verbose',
+      description: 'reports any identifier',
+      category: 'generic',
+      defaultSeverity: 'warn',
+      triggers: [],
+      create: (context) => ({
+        Identifier(node: any) {
+          context.report({
+            ruleId: 'test/untriggered-verbose',
+            message: 'unconditional',
+            line: node.loc?.start?.line ?? 1,
+            column: node.loc?.start?.column ?? 0,
+          });
+        },
+      }),
+    };
+
+    const engine = makeEngine([undeclared], { verbose: true });
+    engine.analyze('/app/a.ts', CLEAN_CODE);
+    engine.analyze('/app/b.ts', CLEAN_CODE);
+    engine.analyze('/app/c.ts', CLEAN_CODE);
+
+    const triggerWarnings = warnSpy.mock.calls
+      .map((c) => c.join(' '))
+      .filter((m) => m.includes('triggers'));
+    expect(triggerWarnings).toHaveLength(1);
+    expect(triggerWarnings[0]).toContain('test/untriggered-verbose');
+
+    warnSpy.mockRestore();
+  });
+
+  it('does not warn about triggers: [] when verbose is off', () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const undeclared: RuleDefinition = {
+      id: 'test/untriggered-quiet',
+      description: 'reports any identifier',
+      category: 'generic',
+      defaultSeverity: 'warn',
+      triggers: [],
+      create: (context) => ({
+        Identifier(node: any) {
+          context.report({
+            ruleId: 'test/untriggered-quiet',
+            message: 'unconditional',
+            line: node.loc?.start?.line ?? 1,
+            column: node.loc?.start?.column ?? 0,
+          });
+        },
+      }),
+    };
+
+    const engine = makeEngine([undeclared]);
+    engine.analyze('/app/a.ts', CLEAN_CODE);
+
+    expect(
+      warnSpy.mock.calls.map((c) => c.join(' ')).filter((m) => m.includes('triggers'))
+    ).toHaveLength(0);
+    warnSpy.mockRestore();
+  });
+
   it('excludes disabled rules from the trigger set', () => {
     const engine = makeEngine(builtinRules, {
       frameworks: [],

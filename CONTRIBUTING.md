@@ -69,8 +69,9 @@ export const myNewRule: RuleDefinition = {
   //  2. Keep them specific. A bare 'on' is a substring of `const` and 'off' of
   //     `offset`, which would make the prefilter match nearly every file.
   //
-  // Use `triggers: []` if the rule genuinely cannot be described this way; it
-  // will then always be parsed.
+  // Use `triggers: []` only if the rule genuinely cannot be described this
+  // way: an empty list disables the prefilter for the ENTIRE engine (every
+  // file is parsed for every rule), and verbose mode warns once about it.
   triggers: ['setInterval'],
 
   create(context: RuleContext) {

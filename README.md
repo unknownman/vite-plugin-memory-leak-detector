@@ -210,7 +210,7 @@ memoryLeakDetector({
 
 Almost undetectably. Three things keep it cheap:
 
-- **Most files are never parsed.** Every rule declares the identifiers it looks for (`triggers`). If a file contains none of them, it is skipped before `oxc-parser` runs at all. On a benchmark of 300 leak-free modules with all 11 rules enabled, this cut analysis from ~137 ms to ~0.4 ms.
+- **Most files are never parsed.** Every rule declares the identifiers it looks for (`triggers`). If a file contains none of them, it is skipped before `oxc-parser` runs at all. On a benchmark of 300 leak-free modules with all 11 rules enabled, this cut analysis from ~135 ms to ~0.6 ms. Even when 30% of the clean modules contain a trigger (`addEventListener`) and must be parsed anyway, analysis stays at ~13 ms.
 - **Each file is analyzed once.** Results are cached by path and content hash, so a single edit is not re-analyzed by several Vite hooks.
 - **One traversal for all rules.** Visitors are indexed by node type, so the walk is not `O(nodes x rules)`.
 
@@ -284,7 +284,9 @@ const customIndexDBRule: RuleDefinition = {
   // Required. The file is not even parsed unless the source contains one of
   // these substrings, so list every identifier your rule reports on. Teardown
   // names usually don't belong: a rule only inspects a cleanup *after* it has
-  // seen an allocation. Use `triggers: []` to opt out of prefiltering.
+  // seen an allocation. Use `triggers: []` only as a last resort: an empty
+  // list disables the prefilter for the whole engine, so every file is parsed
+  // on every analysis (and `verbose` mode warns once about it).
   triggers: ['indexedDB.open', 'indexedDB.deleteDatabase'],
 
   create(context) {
@@ -365,7 +367,7 @@ Adding AST analysis to a bundler can sometimes slow down development. We enginee
 
 Run the benchmark yourself with `npx tsx benchmarks/phase4.ts`.
 
-Reproduce the numbers above on 300 leak-free modules plus 20 leaky ones (397 kB, all 11 rules): prefilter off ~137 ms, prefilter on ~0.4 ms; traversal alone ~6.8 ms to ~5.5 ms. See [`benchmarks/phase4.ts`](benchmarks/phase4.ts).
+Reproduce the numbers above on 300 leak-free modules plus 20 leaky ones (397 kB, all 11 rules): prefilter off ~135 ms, prefilter on ~0.6 ms, and ~13 ms when 30% of the clean modules contain `addEventListener` and are parsed anyway; traversal alone ~6.8 ms to ~5.5 ms. See [`benchmarks/phase4.ts`](benchmarks/phase4.ts).
 
 ## License
 

@@ -32,6 +32,12 @@ export class LeakDetectorEngine {
     triggers: Set<string>;
   };
 
+  /**
+   * True after the verbose warning about a `triggers: []` rule has fired, so
+   * a rule that opts out of prefiltering does not log once per analyzed file.
+   */
+  private warnedAboutMissingTriggers = false;
+
   constructor(config: ResolvedPluginConfig) {
     this.config = config;
     this.commentHandler = new CommentDirectivesHandler(
@@ -89,9 +95,11 @@ export class LeakDetectorEngine {
 
   /**
    * Union of the triggers of every rule that survived category and severity
-   * filtering. Returns `null` when a rule has no `triggers` array, which forces
-   * the caller down the full-parse path: a rule that cannot describe its own
-   * requirements must never be silently skipped.
+   * filtering. Returns `null` when a rule declares no triggers (empty array
+   * or missing), which forces the caller down the full-parse path: a rule that
+   * cannot describe its own requirements must never be silently skipped, and
+   * the empty list disables the prefilter for the whole engine, not just for
+   * that rule.
    */
   private getActiveTriggers(): Set<string> | null {
     const cache = this.activeTriggerCache;
@@ -114,7 +122,20 @@ export class LeakDetectorEngine {
         continue;
       }
       if (this.resolveSeverity(rule.id) === 'off') continue;
-      if (!Array.isArray(rule.triggers) || rule.triggers.length === 0) return null;
+      if (!Array.isArray(rule.triggers) || rule.triggers.length === 0) {
+        // An empty trigger list disables the prefilter for the whole engine, so
+        // every file reaches the parser. Worth surfacing in verbose mode: it is
+        // usually an oversight in a custom rule rather than a deliberate choice.
+        if (this.config.verbose && !this.warnedAboutMissingTriggers) {
+          this.warnedAboutMissingTriggers = true;
+          console.warn(
+            `[MemoryLeakDetector] Rule '${rule.id}' declares no triggers, ` +
+              `disabling the parser prefilter: every file will be parsed. ` +
+            `List the identifiers the rule reports on in \`triggers\` to restore the fast path.`
+          );
+        }
+        return null;
+      }
       for (const trigger of rule.triggers) triggers.add(trigger);
     }
 

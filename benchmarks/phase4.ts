@@ -93,6 +93,36 @@ function corpus(clean: number, leaky: number): Array<[string, string]> {
   return files;
 }
 
+/**
+ * A leak-free module that still contains a trigger substring (`addEventListener`),
+ * so the prefilter lets it through and the full parser + traversal runs.
+ * Models a real app where ~30% of clean files register listeners.
+ */
+const CLEAN_LISTENER_MODULE = `
+import { onClickOutside } from './dom';
+
+export function bindPanel(panel: HTMLElement, onClose: () => void) {
+  const handler = () => onClose();
+  panel.addEventListener('keydown', handler);
+  onClickOutside(panel, handler);
+  return () => panel.removeEventListener('keydown', handler);
+}
+`;
+
+/** 30% of the clean corpus contains `addEventListener`; the rest never triggers. */
+function mixedCorpus(clean: number): Array<[string, string]> {
+  const files: Array<[string, string]> = [];
+  for (let i = 0; i < clean; i++) {
+    const listener = i % 10 < 3;
+    files.push(
+      listener
+        ? [`/app/src/clean-listener-${i}.ts`, CLEAN_LISTENER_MODULE]
+        : [`/app/src/clean-${i}.ts`, CLEAN_MODULE]
+    );
+  }
+  return files;
+}
+
 function time(engine: LeakDetectorEngine, files: Array<[string, string]>) {
   const started = performance.now();
   let diagnostics = 0;
@@ -101,6 +131,16 @@ function time(engine: LeakDetectorEngine, files: Array<[string, string]>) {
 }
 
 const engine = new LeakDetectorEngine(resolvePluginConfig({ mode: 'warn', customRules: builtinRules }));
+
+// Same rules with an empty trigger list: the prefilter is disabled engine-wide,
+// so every file takes the full parse + traversal path. This is the "off" side
+// of the README's prefilter comparison.
+const enginePrefilterOff = new LeakDetectorEngine(
+  resolvePluginConfig({
+    mode: 'warn',
+    customRules: builtinRules.map((r) => ({ ...r, triggers: [] })),
+  })
+);
 
 const CLEAN = 300;
 const LEAKY = 20;
@@ -111,12 +151,15 @@ for (let i = 0; i < 3; i++) time(engine, files);
 
 const RUNS = 10;
 const cleanRuns: number[] = [];
+const mixedRuns: number[] = [];
+const offRuns: number[] = [];
 const leakyRuns: number[] = [];
 let diagnostics = 0;
 
 for (let i = 0; i < RUNS; i++) {
-  const clean = time(engine, corpus(CLEAN, 0));
-  cleanRuns.push(clean.ms);
+  cleanRuns.push(time(engine, corpus(CLEAN, 0)).ms);
+  mixedRuns.push(time(engine, mixedCorpus(CLEAN)).ms);
+  offRuns.push(time(enginePrefilterOff, corpus(CLEAN, 0)).ms);
   const leaky = time(engine, corpus(0, LEAKY));
   leakyRuns.push(leaky.ms);
   diagnostics = leaky.diagnostics;
@@ -129,6 +172,8 @@ const totalBytes = files.reduce((n, [, code]) => n + code.length, 0);
 
 console.log(`corpus: ${CLEAN} clean modules + ${LEAKY} leaky modules (${kb(totalBytes)} total)`);
 console.log(`rules:  ${builtinRules.length} built-in, trigger union ${new Set(builtinRules.flatMap((r) => r.triggers)).size} substrings\n`);
-console.log(`clean files  median ${median(cleanRuns).toFixed(1)} ms`);
+console.log(`clean files, 0% trigger hits   median ${median(cleanRuns).toFixed(1)} ms`);
+console.log(`clean files, 30% addEventListener hits (parsed)  median ${median(mixedRuns).toFixed(1)} ms`);
+console.log(`clean files, prefilter off (every file parsed)  median ${median(offRuns).toFixed(1)} ms`);
 console.log(`leaky files  median ${median(leakyRuns).toFixed(1)} ms`);
 console.log(`leaky diagnostics found: ${diagnostics}`);

@@ -45,10 +45,17 @@ export interface RuleDefinition {
    *
    * A file is prefiltered against the union of the enabled rules' triggers
    * before it is parsed, so a module that allocates nothing never reaches the
-   * parser. Every identifier a rule inspects — the allocating call/constructor
-   * *and* the lifecycle or teardown names it treats as a cleanup — must be
-   * listed. A missing trigger silently disables a rule for the files that do
-   * contain its pattern, so keep these in sync with the rule body.
+   * parser. List the allocation or registration the report anchors on
+   * (`setInterval`, `addEventListener`, `Effect`, ...). Teardown names the
+   * rule only inspects *after* seeing that allocation (`clearInterval`,
+   * `off`, `onUnmounted`) add no coverage: a file containing only teardown
+   * can never produce a report. A missing trigger silently disables a rule
+   * for the files that do contain its pattern, so keep these in sync with
+   * the rule body.
+   *
+   * `triggers: []` disables the prefilter for the *entire* engine — every
+   * file is parsed for every rule — and makes `verbose` mode warn once, so
+   * reserve it for rules that cannot be described as a substring check.
    *
    * Rule categories still apply on top: this is only a cheap string check, not
    * a replacement for category filtering.

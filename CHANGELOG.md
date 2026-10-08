@@ -26,8 +26,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   };
   ```
 
-  Rules that cannot describe their requirements this way can use `triggers: []`,
-  which opts out of prefiltering for that rule (it is always parsed).
+  Rules that cannot describe their requirements this way can use `triggers: []`.
+  This disables the prefilter for the **whole engine** — every source file is
+  parsed on every analysis, for all rules — so reserve it for rules that
+  genuinely cannot be described as a substring check. In `verbose` mode the
+  plugin warns once identifying the rule.
 
 - **Baseline files are regenerated for the v2 fingerprint.** See Changed.
 
