@@ -283,7 +283,9 @@ describe('memoryLeakDetectorPlugin Vite integration (phase 3)', () => {
     expect(summaryPrints()).toHaveLength(1);
 
     // Same file, same diagnostic count, different leak -> different fingerprint.
-    writeFileSync(file, 'const id = setInterval(tick, 2000);', 'utf8');
+    // The replacement renames the variable: under A6 a number-only change
+    // (`1000` -> `2000`) is deliberately the *same* identity.
+    writeFileSync(file, 'const swapped = setInterval(tick, 1000);', 'utf8');
     await plugin.transform.call(ctx, readFileSync(file, 'utf8'), file);
     await vi.advanceTimersByTimeAsync(2000);
     expect(summaryPrints()).toHaveLength(2);

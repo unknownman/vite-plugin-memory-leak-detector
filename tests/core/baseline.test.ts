@@ -120,7 +120,9 @@ describe('Baseline Fingerprinting', () => {
   });
 
   it('collapses whitespace so reindentation does not change a fingerprint', () => {
-    expect(normalizeSnippet('  const   id  =  1;  ')).toBe('const id = 1;');
+    // Changed expectation (A6): the numeric literal also collapses to 0, so
+    // changing a timer's delay does not orphan a baseline entry.
+    expect(normalizeSnippet('  const   id  =  1;  ')).toBe('const id = 0;');
     const diag: Diagnostic = {
       ruleId: 'rule-a',
       message: 'Leak',
@@ -133,6 +135,19 @@ describe('Baseline Fingerprinting', () => {
     expect(generateFingerprint({ ...diag, snippet: 'const id = 1;' }, '/app')).toBe(
       generateFingerprint(diag, '/app')
     );
+  });
+
+  it('normalizes numeric and string-literal contents out of a snippet', () => {
+    // Changing a delay, a count, or a URL inside the leaking line is the same
+    // leak: those literals must not change the diagnostic's identity.
+    expect(normalizeSnippet('const id = setInterval(tick, 1000);')).toBe(
+      'const id = setInterval(tick, 0);'
+    );
+    expect(normalizeSnippet("fetch('https://api.example.com/v1/users', { retries: 3 })")).toBe(
+      "fetch('', { retries: 0 })"
+    );
+    expect(normalizeSnippet('const t = `text ${x} 42`;')).toBe('const t = ``;');
+    expect(normalizeSnippet('  const   id  =  1;  ')).toBe('const id = 0;');
   });
 
   it('uses relative paths for cross-machine portability', () => {
@@ -262,6 +277,80 @@ describe('Baseline precision (v2)', () => {
       // The compatibility notice is printed exactly once.
       expect(warn).toHaveBeenCalledTimes(1);
       expect(warn.mock.calls[0][0]).toContain('legacy v1 format');
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('keeps the occurrence index stable when one of two identical leaks is comment-suppressed', () => {
+    const file = path.join(dir, 'occ.ts');
+    const plain = [
+      'export function a() {',
+      '  const id = setInterval(tick, 1000);',
+      '}',
+      'export function b() {',
+      '  const id = setInterval(tick, 1000);',
+      '}',
+    ].join('\n');
+    const suppressed = [
+      'export function a() {',
+      '  /* memory-leak-ignore-start */',
+      '  const id = setInterval(tick, 1000);',
+      '  /* memory-leak-ignore-end */',
+      '}',
+      'export function b() {',
+      '  const id = setInterval(tick, 1000);',
+      '}',
+    ].join('\n');
+
+    const all = makeEngine().analyze(file, plain);
+    expect(all).toHaveLength(2);
+
+    const remaining = makeEngine().analyze(file, suppressed);
+    expect(remaining).toHaveLength(1);
+    // The surviving leak is the *second* occurrence: suppressing the first one
+    // must not shift it to occurrence index 0, or its baseline entry orphans.
+    expect(remaining[0].fingerprint).toBe(all[1].fingerprint);
+  });
+
+  it('reads a future major version as current format, not legacy (numeric, not lexicographic)', () => {
+    const file = path.join(dir, 'future.ts');
+    const baselinePath = file + '.baseline.json';
+    const code = 'const id = setInterval(tick, 1000);';
+
+    const probeEngine = makeEngine();
+    probeEngine.setRoot(dir);
+    const probe = probeEngine.analyze(file, code);
+    expect(probe).toHaveLength(1);
+
+    fs.writeFileSync(
+      baselinePath,
+      JSON.stringify(
+        {
+          version: '10.0.0',
+          updatedAt: new Date().toISOString(),
+          issues: [
+            {
+              fingerprint: probe[0].fingerprint,
+              ruleId: probe[0].ruleId,
+              file: 'future.ts',
+              message: probe[0].message,
+            },
+          ],
+        },
+        null,
+        2
+      )
+    );
+
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const engine = makeEngine({ path: baselinePath });
+      engine.setRoot(dir);
+      expect(engine.analyze(file, code)).toHaveLength(0);
+      // '10.0.0' < '2.0.0' lexicographically — a string compare would wrongly
+      // flag this baseline as the legacy v1 format.
+      expect(warn).not.toHaveBeenCalled();
     } finally {
       warn.mockRestore();
     }

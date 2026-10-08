@@ -20,12 +20,24 @@ export interface BaselineFile {
 }
 
 /**
- * Normalizes a source line for fingerprinting: whitespace runs collapse to a
- * single space and the result is trimmed, so reindenting or re-wrapping a line
- * does not change a diagnostic's identity.
+ * Normalizes a source line for fingerprinting so that edits which do not change
+ * *what* leaked do not change the diagnostic's identity:
+ *
+ * - string/template literal contents are emptied (a new URL or message inside
+ *   the leaking call is the same leak),
+ * - numbers collapse to `0` (a new delay or retry count is the same leak),
+ * - whitespace runs collapse to a single space and the result is trimmed, so
+ *   reindenting or re-wrapping a line changes nothing.
+ *
+ * Digit runs adjacent to identifier characters (`id2`, `2fa`) are left alone:
+ * they are part of a name, not a numeric literal.
  */
 export function normalizeSnippet(line: string): string {
-  return line.replace(/\s+/g, ' ').trim();
+  return line
+    .replace(/'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"|`(?:[^`\\]|\\.)*`/g, (m) => m[0] + m[0])
+    .replace(/(?<![\w$])\d+(?:\.\d+)?(?![\w$])/g, '0')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 /**
@@ -63,9 +75,8 @@ export function generateLegacyFingerprint(diag: Diagnostic, cwd: string = proces
 export class BaselineManager {
   private baselinePath: string;
   private root: string;
+  /** Fingerprints recorded in the file, in whichever format it was written. */
   private knownFingerprints = new Set<string>();
-  /** v1 (`rule|file|message`) fingerprints, used only when reading a v1 file. */
-  private legacyFingerprints = new Set<string>();
   /** True when the loaded file used the v1 format, so diagnostics match by legacy key. */
   private usingLegacyFormat = false;
   private warnedAboutLegacy = false;
@@ -81,12 +92,13 @@ export class BaselineManager {
     try {
       const raw = fs.readFileSync(this.baselinePath, 'utf-8');
       const data = JSON.parse(raw) as BaselineFile;
-      // Anything without an explicit version, or older than 2, predates the
-      // snippet-based fingerprint.
-      this.usingLegacyFormat = !data.version || data.version < '2.0.0';
+      // Anything without an explicit version, or with a major version below 2,
+      // predates the snippet-based fingerprint. Compare majors numerically —
+      // a lexicographic `'10.0.0' < '2.0.0'` would misread future versions.
+      const major = Number.parseInt(String(data.version ?? ''), 10);
+      this.usingLegacyFormat = !Number.isFinite(major) || major < 2;
       for (const issue of data.issues ?? []) {
         this.knownFingerprints.add(issue.fingerprint);
-        this.legacyFingerprints.add(issue.fingerprint);
       }
       if (this.usingLegacyFormat && !this.warnedAboutLegacy) {
         this.warnedAboutLegacy = true;
@@ -109,7 +121,9 @@ export class BaselineManager {
       diag.fingerprint = generateFingerprint(diag, this.root);
     }
     if (this.knownFingerprints.has(diag.fingerprint)) return true;
-    return this.usingLegacyFormat && this.legacyFingerprints.has(generateLegacyFingerprint(diag, this.root));
+    return (
+      this.usingLegacyFormat && this.knownFingerprints.has(generateLegacyFingerprint(diag, this.root))
+    );
   }
 
   /**

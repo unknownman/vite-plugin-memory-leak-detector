@@ -183,19 +183,23 @@ export class LeakDetectorEngine {
       ast,
       isAllowlisted,
       report: (diag) => {
-        // 2. GLOB PATTERN RULE FILTERING
-        if (this.ignoreManager.isRuleIgnoredForFile(file, diag.ruleId)) return;
-
-        const severity = diag.severity || this.resolveSeverity(diag.ruleId);
-        if (severity === 'off') return;
-
         const actualLine = (diag.line ?? 1) + offset.lineOffset;
         const actualCol = (diag.column ?? 0) + ((diag.line ?? 1) === 1 ? offset.columnOffset : 0);
+        const severity = diag.severity || this.resolveSeverity(diag.ruleId);
 
-        // 3. INLINE COMMENT SUPPRESSION
-        if (this.commentHandler.isSuppressed(diag.ruleId, actualLine, directives)) {
-          return;
-        }
+        // Snippet + occurrence index make the fingerprint specific to *what*
+        // leaked rather than just which rule and message fired. Neither depends
+        // on the line number, so inserting code above a leak keeps it baselined.
+        //
+        // This runs BEFORE any suppression (severity off, rule ignore, inline
+        // comment, baseline): every diagnostic a rule emits consumes its slot in
+        // the occurrence sequence even when it is not shown. Otherwise a
+        // suppressed first occurrence would shift the survivor to index 0 and
+        // orphan its baseline entry the moment someone adds an ignore comment.
+        const snippet = normalizeSnippet(originalLines[actualLine - 1] ?? '');
+        const occurrenceKey = `${diag.ruleId}|${file}|${snippet}`;
+        const occurrenceIndex = occurrenceCounters.get(occurrenceKey) ?? 0;
+        occurrenceCounters.set(occurrenceKey, occurrenceIndex + 1);
 
         const diagnostic: Diagnostic = {
           ...diag,
@@ -205,17 +209,19 @@ export class LeakDetectorEngine {
           column: actualCol,
           endLine: diag.endLine !== undefined ? diag.endLine + offset.lineOffset : undefined,
           endColumn: diag.endColumn,
+          snippet,
         };
-
-        // Snippet + occurrence index make the fingerprint specific to *what*
-        // leaked rather than just which rule and message fired. Neither depends
-        // on the line number, so inserting code above a leak keeps it baselined.
-        diagnostic.snippet = normalizeSnippet(originalLines[actualLine - 1] ?? '');
-        const occurrenceKey = `${diagnostic.ruleId}|${file}|${diagnostic.snippet}`;
-        const occurrenceIndex = occurrenceCounters.get(occurrenceKey) ?? 0;
-        occurrenceCounters.set(occurrenceKey, occurrenceIndex + 1);
-
         diagnostic.fingerprint = generateFingerprint(diagnostic, this.root, occurrenceIndex);
+
+        // 2. GLOB PATTERN RULE FILTERING
+        if (this.ignoreManager.isRuleIgnoredForFile(file, diag.ruleId)) return;
+
+        if (severity === 'off') return;
+
+        // 3. INLINE COMMENT SUPPRESSION
+        if (this.commentHandler.isSuppressed(diag.ruleId, actualLine, directives)) {
+          return;
+        }
 
         // 4. BASELINE SUPPRESSION
         const baselineManager = this.getBaselineManager();
