@@ -254,10 +254,20 @@ export function memoryLeakDetectorPlugin(options: PluginOptions = {}): Plugin {
       // In build/watch mode nothing clears the map between rebuilds, so entries
       // from a previous pass would be re-reported as if still present. Dev keeps
       // its map: there the entries are the current state of the module graph.
+      //
+      // Only the current environment's bucket is dropped: a multi-environment
+      // build (client + ssr + ...) runs this hook once per environment, and a
+      // full clear here would make the last environment's pass erase every
+      // earlier one's findings. `buildEnd` then reports the cumulative union.
       if (isBuild) {
-        diagnosticMap.clear();
+        const prefix = `${environmentNameOf(this)}\u0000`;
+        for (const key of Array.from(diagnosticMap.keys())) {
+          if (key.startsWith(prefix)) diagnosticMap.delete(key);
+        }
+        for (const key of Array.from(printedFileState.keys())) {
+          if (key.startsWith(prefix)) printedFileState.delete(key);
+        }
         analysisCache.clear();
-        printedFileState.clear();
       }
     },
 
