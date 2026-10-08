@@ -75,11 +75,14 @@ export function memoryLeakDetectorPlugin(options: PluginOptions = {}): Plugin {
 
   /**
    * Vite 6+ exposes the active environment on the plugin context; Vite 4/5 do
-   * not, so `undefined` degrades to a single unnamed bucket.
+   * not. The unnamed case is canonicalized to `'client'` so one file analyzed
+   * through hooks with and without an environment (e.g. `hotUpdate` then the
+   * legacy `handleHotUpdate`) lands in the same bucket instead of being
+   * tracked — and printed — twice.
    */
   const environmentNameOf = (ctx: unknown): string => {
     const name = (ctx as { environment?: { name?: string } } | undefined)?.environment?.name;
-    return name ?? '';
+    return name ?? 'client';
   };
 
   const cacheKeyOf = (ctx: unknown, file: string): string =>
@@ -88,17 +91,20 @@ export function memoryLeakDetectorPlugin(options: PluginOptions = {}): Plugin {
   /**
    * 3.3 The same file can be analyzed once per environment, which would repeat
    * identical findings. Collapse anything that matches on file, rule and
-   * position, and drop exact duplicates outright.
+   * position, and drop exact fingerprint duplicates outright.
+   *
+   * The fingerprint is only a dedup key when it exists: two distinct
+   * diagnostics without one must not collide on an empty key.
    */
   function dedupeDiagnostics(diagnostics: Diagnostic[]): Diagnostic[] {
     const seen = new Set<string>();
     const out: Diagnostic[] = [];
     for (const d of diagnostics) {
-      if (seen.has(d.fingerprint ?? '')) continue;
+      if (d.fingerprint !== undefined && seen.has(`fp:${d.fingerprint}`)) continue;
       const key = `${d.file}|${d.ruleId}|${d.line}|${d.column}|${d.message}`;
       if (seen.has(key)) continue;
       seen.add(key);
-      seen.add(d.fingerprint ?? '');
+      if (d.fingerprint !== undefined) seen.add(`fp:${d.fingerprint}`);
       out.push(d);
     }
     return out;
@@ -134,7 +140,9 @@ export function memoryLeakDetectorPlugin(options: PluginOptions = {}): Plugin {
     if (!hasTerminalReport() || isBuild) return;
     if (diagnosticMap.size === 0) return;
 
-    const allDiagnostics = Array.from(diagnosticMap.values()).flat();
+    // Collapse the per-environment copies of one file before summarizing, so a
+    // file analyzed for both client and ssr counts — and prints — once.
+    const allDiagnostics = dedupeDiagnostics(Array.from(diagnosticMap.values()).flat());
     if (allDiagnostics.length === 0) return;
 
     // 3.6 Key on the sorted fingerprint list, not per-file counts: swapping one

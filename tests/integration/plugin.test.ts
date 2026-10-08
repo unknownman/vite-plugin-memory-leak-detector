@@ -314,6 +314,74 @@ describe('memoryLeakDetectorPlugin Vite integration (phase 3)', () => {
     expect(summaryPrints()).toHaveLength(1);
   });
 
+  it('treats a missing environment as the client environment', async () => {
+    const plugin = memoryLeakDetectorPlugin() as any;
+    plugin.configResolved({ command: 'serve' });
+    plugin.buildStart();
+
+    const file = write('canon.ts', 'setInterval(() => {}, 1000);');
+    const ctx = { warn: vi.fn(), error: vi.fn() };
+
+    // Vite 6 environment hook fires with an explicit environment, then the
+    // legacy hook fires with a context that carries none. Both must address
+    // the same bucket or the second pass reprints the identical report.
+    await plugin.hotUpdate.call({ ...ctx, environment: { name: 'client' } }, { file, modules: [{ file }] });
+    await plugin.handleHotUpdate.call(ctx, { file, modules: [] });
+
+    const reports = logSpy.mock.calls.map((c) => c.join(' ')).filter((m) => m.includes('canon.ts'));
+    expect(reports).toHaveLength(1);
+  });
+
+  it('deduplicates the dev summary across environments that saw the same file', async () => {
+    vi.useFakeTimers();
+    const plugin = memoryLeakDetectorPlugin() as any;
+    plugin.configResolved({ command: 'serve' });
+    plugin.buildStart();
+
+    const file = write('envsum.ts', 'setInterval(() => {}, 1000);');
+    const code = readFileSync(file, 'utf8');
+    const ctx = { warn: vi.fn(), error: vi.fn() };
+
+    await plugin.transform.call({ ...ctx, environment: { name: 'client' } }, code, file);
+    await plugin.transform.call({ ...ctx, environment: { name: 'ssr' } }, code, file);
+    await vi.advanceTimersByTimeAsync(2000);
+
+    const leakLines = logSpy.mock.calls
+      .map((c) => c.join(' '))
+      .filter((m) => m.includes("never assigned to a variable"));
+    expect(leakLines).toHaveLength(1);
+  });
+
+  it('does not collapse distinct diagnostics that lack fingerprints', async () => {
+    const plugin = memoryLeakDetectorPlugin() as any;
+    plugin.configResolved({ command: 'build' });
+    plugin.buildStart();
+
+    vi.spyOn(LeakDetectorEngine.prototype, 'analyze').mockImplementation(
+      ((file: string) => [
+        {
+          ruleId: 'test/no-fp',
+          message: `leak in ${file}`,
+          line: 1,
+          column: 1,
+          severity: 'warn',
+          file,
+          snippet: 'x',
+          // deliberately no fingerprint
+        },
+      ]) as any
+    );
+
+    const ctx = { warn: vi.fn(), error: vi.fn() };
+    const dispatchSpy = vi.spyOn(reporterModule, 'dispatchReports');
+    await plugin.transform.call(ctx, 'const a = 1;', write('a.ts', 'const a = 1;'));
+    await plugin.transform.call(ctx, 'const b = 2;', write('b.ts', 'const b = 2;'));
+    await plugin.buildEnd.call(ctx);
+
+    expect(dispatchSpy.mock.calls[0][0]).toHaveLength(2);
+    dispatchSpy.mockRestore();
+  });
+
   it('uses the Vite logger instead of the console once the config is resolved', async () => {
     const info = vi.fn();
     const plugin = memoryLeakDetectorPlugin() as any;
