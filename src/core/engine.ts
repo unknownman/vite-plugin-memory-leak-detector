@@ -274,10 +274,15 @@ export class LeakDetectorEngine {
       }
     }
 
-    // Single-pass AST Traversal
+    // Single-pass AST Traversal. The `*` / `*:exit` wildcard bucket runs for
+    // every node: before the type-specific handlers on enter, after them on
+    // exit. That order lets a wildcard wrapper observe the parent's state
+    // before (and unwind it after) the node-type handler runs.
     const ancestors: any[] = [];
     walk(ast, {
       enter(node: any, parent: any) {
+        const wildcards = enterMap.get('*');
+        if (wildcards) for (const handler of wildcards) handler(node, parent, ancestors);
         const handlers = enterMap.get(node.type);
         if (handlers) for (const handler of handlers) handler(node, parent, ancestors);
         ancestors.push(node);
@@ -286,6 +291,8 @@ export class LeakDetectorEngine {
         ancestors.pop();
         const handlers = exitMap.get(node.type);
         if (handlers) for (const handler of handlers) handler(node, parent, ancestors);
+        const wildcards = exitMap.get('*');
+        if (wildcards) for (const handler of wildcards) handler(node, parent, ancestors);
       },
     });
 

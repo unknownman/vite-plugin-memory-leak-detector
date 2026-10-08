@@ -84,15 +84,6 @@ const CONDITIONAL_NODE_TYPES = ['IfStatement', 'SwitchCase', 'ConditionalExpress
  */
 const GUARDED_CONDITION_TYPES = new Set(['IfStatement', 'ConditionalExpression']);
 
-/**
- * Node types that can begin a branch of an `if`/ternary, used to tell whether
- * the current position sits in the consequent or the alternate. The guard that
- * introduced the conditional only protects the consequent: in
- * `if (id) { ... } else { clearInterval(id) }` the clearance runs precisely
- * when the guard is false.
- */
-const BRANCH_STATEMENT_TYPES = ['BlockStatement', 'ExpressionStatement', 'ReturnStatement', 'ThrowStatement', 'IfStatement'];
-
 /** Call names that release a resource, used to locate a clearance inside an expression. */
 const CLEARANCE_CALL_NAMES = new Set([
   'clearInterval',
@@ -362,7 +353,7 @@ export class ScopeTracker {
   }
 
   /**
-   * Returns true when `node`, a conditional construct, directly guards the
+   * Returns true when `entry`, a conditional construct, directly guards the
    * given name. Recognizes a direct reference (`if (id)`, `if (this.timer)`),
    * a comparison against `null`/`undefined` (`if (id !== null)`), logical
    * short-circuits, and the same patterns behind an optional chain
@@ -370,14 +361,15 @@ export class ScopeTracker {
    *
    * A guard sitting in the `else` branch of the very conditional it came from
    * is not a guard at all (`if (id) {} else { clearInterval(id) }` runs when
-   * `id` is falsy), so that case returns false.
+   * `id` is falsy), so that case returns false — for EVERY enclosing entry,
+   * not just the innermost one.
    */
-  isSelfGuarded(node: any, name: string): boolean {
+  isSelfGuarded(entry: ConditionalEntry, name: string): boolean {
+    const node = entry?.node;
     if (!node || typeof node !== 'object' || !name) return false;
 
     // The guard only protects the consequent of the conditional that owns it.
-    const top = this.conditionalStack[this.conditionalStack.length - 1];
-    if (top && top.node === node && top.branch === 'alternate') return false;
+    if (entry.branch === 'alternate') return false;
 
     // Unwrap the conditional wrapper to reach the guard expression itself.
     let guard = node;
@@ -467,7 +459,7 @@ export class ScopeTracker {
     // `case` label, or the `else` side of the guard itself — means the
     // clearance may never run, so the resource can still leak.
     const selfGuarded =
-      inConditional && entries.every((entry) => entry.node && this.isSelfGuarded(entry.node, name));
+      inConditional && entries.every((entry) => this.isSelfGuarded(entry, name));
 
     this.clearances.push({
       name,
@@ -740,8 +732,13 @@ export interface ScopeListenersHooks {
  *  - Conditional constructs (`if`, `switch` case, `? :`, `&&`, `||`) which
  *    mark guard-gated clearances as conditional.
  *
- * Note: it sets `visitor[type]` unconditionally for these node types, so rules
- * must not define their own handlers for them.
+ * Note: it sets `visitor[type]` unconditionally for the block- and
+ * conditional-scope node types, so rules must not define their own handlers
+ * for them. Branch marking (`consequent`/`alternate`) is installed on the
+ * `*` / `*:exit` wildcard keys instead of node-type keys, so a rule's own
+ * `IfStatement`, `BlockStatement`, `ReturnStatement`, ... handlers cannot
+ * clobber it — but a rule that needs its own wildcard handler must chain
+ * (call `attachScopeListeners` first, then compose with `visitor['*']`).
  */
 export function attachScopeListeners(tracker: ScopeTracker, visitor: RuleVisitor, hooks?: ScopeListenersHooks): void {
   visitor.Program = () => tracker.enterRootScope();
@@ -764,24 +761,25 @@ export function attachScopeListeners(tracker: ScopeTracker, visitor: RuleVisitor
   };
 
   // Mark which branch of an `if`/`? :` the walker is entering, so a guard is
-  // not credited for protecting the `else` side. These handlers wrap whatever
-  // handler is already registered for the node type (the block-scope listener
-  // above, or a rule's own) so scope tracking is unaffected.
-  for (const type of BRANCH_STATEMENT_TYPES) {
-    const enter = visitor[type];
-    const leave = visitor[`${type}:exit`];
-    visitor[type] = (node: any, parent: any, ancestors?: any[]) => {
-      if (parent && (parent.type === 'IfStatement' || parent.type === 'ConditionalExpression')) {
-        tracker.enterConditionalBranch(parent.alternate === node ? 'alternate' : 'consequent');
-      }
-      enter?.(node, parent, ancestors);
-    };
-    visitor[`${type}:exit`] = (node: any, parent: any, ancestors?: any[]) => {
-      leave?.(node, parent, ancestors);
-      if (parent && (parent.type === 'IfStatement' || parent.type === 'ConditionalExpression')) {
-        tracker.exitConditionalBranch();
-      }
-    };
+  // not credited for protecting the `else` side. The wildcard keys run for
+  // every node — before the type-specific handlers on enter, after them on
+  // exit — which means: on enter the owning conditional is already pushed and
+  // still on top; on exit a nested conditional (e.g. an `else if` chain) has
+  // already been popped. Because these are `*` handlers, a rule may freely
+  // define its own `IfStatement`, `BlockStatement`, `ReturnStatement`, ...
+  // handlers without clobbering branch tracking.
+  const isBranchOwner = (parent: any): boolean =>
+    !!parent && (parent.type === 'IfStatement' || parent.type === 'ConditionalExpression');
+
+  visitor['*'] = (node: any, parent: any) => {
+    if (parent && parent.test === node) return; // the guard expression itself
+    if (!isBranchOwner(parent)) return;
+    tracker.enterConditionalBranch(parent.alternate === node ? 'alternate' : 'consequent');
+  };
+  visitor['*:exit'] = (node: any, parent: any) => {
+    if (parent && parent.test === node) return;
+    if (!isBranchOwner(parent)) return;
+    tracker.exitConditionalBranch();
   };
 
   visitor.CatchClause = (node: any) => {

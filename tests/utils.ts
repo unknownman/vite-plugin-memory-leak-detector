@@ -40,6 +40,8 @@ export function runRule(
   const ancestors: any[] = [];
   walk(ast, {
     enter(node: any, parent: any) {
+      // Mirrors the engine: `*` runs before the type-specific handler.
+      visitor['*']?.(node, parent, ancestors);
       if (visitor[node.type]) visitor[node.type](node, parent, ancestors);
       ancestors.push(node);
     },
@@ -47,6 +49,8 @@ export function runRule(
       ancestors.pop();
       const exitKey = `${node.type}:exit`;
       if (visitor[exitKey]) visitor[exitKey](node, parent, ancestors);
+      // Mirrors the engine: `*:exit` runs after the type-specific handler.
+      visitor['*:exit']?.(node, parent, ancestors);
     },
   });
 

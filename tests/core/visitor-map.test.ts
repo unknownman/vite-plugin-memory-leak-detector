@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest';
+import { walk } from 'estree-walker';
 import { LeakDetectorEngine } from '../../src/core/engine.js';
+import { parseCode } from '../../src/core/parser.js';
 import { resolvePluginConfig } from '../../src/config/index.js';
 import { builtinRules } from '../../src/rules/index.js';
 import type { RuleDefinition } from '../../src/types/rule.js';
@@ -47,6 +49,104 @@ const b = compute(2);
 class Store { value = compute(3); }
 function run() { const c = compute(4); return c; }
 `;
+
+describe('wildcard visitor keys', () => {
+  const WILDCARD_RULE: RuleDefinition = {
+    id: 'probe/wildcard',
+    description: 'exercises the * and *:exit visitor keys',
+    category: 'generic',
+    defaultSeverity: 'warn',
+    triggers: ['setInterval'],
+    create: () => ({}),
+  };
+
+  const CODE_WITH_ONE_CALL = 'setInterval(tick, 1);';
+
+  it('calls the * and *:exit handlers for every node', () => {
+    const enters: string[] = [];
+    const exits: string[] = [];
+    const rule: RuleDefinition = {
+      ...WILDCARD_RULE,
+      create: () => ({
+        '*': (node: any) => enters.push(node.type),
+        '*:exit': (node: any) => exits.push(node.type),
+      }),
+    };
+    const engine = new LeakDetectorEngine(
+      resolvePluginConfig({ mode: 'warn', customRules: [rule] })
+    );
+
+    expect(engine.analyze('/app/src/x.ts', CODE_WITH_ONE_CALL)).toHaveLength(0);
+
+    const { ast } = parseCode(CODE_WITH_ONE_CALL, 'x.ts');
+    let nodeCount = 0;
+    walk(ast!, {
+      enter() {
+        nodeCount++;
+      },
+    });
+
+    expect(nodeCount).toBeGreaterThan(1);
+    expect(enters).toHaveLength(nodeCount);
+    expect(exits).toHaveLength(nodeCount);
+    // Same nodes seen exactly once on each side, root enters first and leaves last.
+    expect([...enters].sort()).toEqual([...exits].sort());
+    expect(enters[0]).toBe('Program');
+    expect(exits[exits.length - 1]).toBe('Program');
+  });
+
+  it('runs * before the type-specific handler on enter and after it on exit', () => {
+    const log: string[] = [];
+    const rule: RuleDefinition = {
+      ...WILDCARD_RULE,
+      create: () => ({
+        '*': () => log.push('wild'),
+        CallExpression: () => log.push('type'),
+        '*:exit': () => log.push('wild:exit'),
+        'CallExpression:exit': () => log.push('type:exit'),
+      }),
+    };
+    const engine = new LeakDetectorEngine(
+      resolvePluginConfig({ mode: 'warn', customRules: [rule] })
+    );
+
+    engine.analyze('/app/src/x.ts', CODE_WITH_ONE_CALL);
+
+    const typeEnter = log.indexOf('type');
+    const typeExit = log.indexOf('type:exit');
+    expect(typeEnter).toBeGreaterThan(0);
+    expect(typeExit).toBeGreaterThan(typeEnter);
+
+    // The wildcard handler for this very node runs immediately before/after.
+    expect(log[typeEnter - 1]).toBe('wild');
+    expect(log[typeExit + 1]).toBe('wild:exit');
+    expect(log.indexOf('wild:exit')).toBeGreaterThan(typeEnter);
+  });
+
+  it('keeps type-specific handlers working when a wildcard handler exists', () => {
+    const seen: string[] = [];
+    const rule: RuleDefinition = {
+      ...WILDCARD_RULE,
+      create: () => ({
+        '*': () => seen.push('*'),
+        Program: () => seen.push('Program'),
+        'Program:exit': () => seen.push('Program:exit'),
+        '*:exit': () => seen.push('*:exit'),
+      }),
+    };
+    const engine = new LeakDetectorEngine(
+      resolvePluginConfig({ mode: 'warn', customRules: [rule] })
+    );
+
+    engine.analyze('/app/src/x.ts', CODE_WITH_ONE_CALL);
+
+    const programEnter = seen.indexOf('Program');
+    const programExit = seen.indexOf('Program:exit');
+    expect(programEnter).toBeGreaterThan(0);
+    expect(seen[programEnter - 1]).toBe('*');
+    expect(seen[programExit + 1]).toBe('*:exit');
+  });
+});
 
 describe('visitor map', () => {
   it('reads each rule visitor a bounded number of times instead of once per node', () => {

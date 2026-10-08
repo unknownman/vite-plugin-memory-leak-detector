@@ -6,6 +6,9 @@ import { noUnclosedWebsocketsRule } from '../../src/rules/generic/no-unclosed-we
 import { noMissingAbortControllerRule } from '../../src/rules/generic/no-missing-abort-controller.js';
 import { noUnconnectedObserversRule } from '../../src/rules/generic/no-unconnected-observers.js';
 import { reactUseEffectCleanupRule } from '../../src/rules/react/react-useeffect-cleanup.js';
+import { ScopeTracker, attachScopeListeners } from '../../src/rules/utils/scope.js';
+import { getAllocationTarget, getExpressionName } from '../../src/rules/utils/tracker.js';
+import type { RuleDefinition, RuleVisitor } from '../../src/types/rule.js';
 
 /**
  * A clearance guarded by `if (id)` is safe: the body only runs when the
@@ -282,6 +285,122 @@ describe('Method-style && clearances', () => {
     const diagnostics = runRule(noUnsubscribedEventsRule, code);
     expect(diagnostics).toHaveLength(1);
     expect(diagnostics[0].message).toContain('never unsubscribed');
+  });
+});
+
+describe('Branch tracking - ternaries and non-block branches', () => {
+  it('reports `id ? noop() : clearInterval(id)` as conditional', () => {
+    const code = `
+      let id = setInterval(tick, 1000);
+      id ? noop() : clearInterval(id);
+    `;
+    const diagnostics = runRule(noUnclearedTimersRule, code);
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0].message).toContain('only cleared conditionally');
+  });
+
+  it('accepts `id ? clearInterval(id) : noop()`', () => {
+    const code = `
+      let id = setInterval(tick, 1000);
+      id ? clearInterval(id) : noop();
+    `;
+    expect(runRule(noUnclearedTimersRule, code)).toHaveLength(0);
+  });
+
+  it('reports a clearance in an `else if` chain as conditional', () => {
+    const code = `
+      let id = setInterval(tick, 1000);
+      if (id) {} else if (x) { clearInterval(id); }
+    `;
+    const diagnostics = runRule(noUnclearedTimersRule, code);
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0].message).toContain('only cleared conditionally');
+  });
+
+  it('reports a clearance in a nested `else` block under its own guard', () => {
+    const code = `
+      let id = setInterval(tick, 1000);
+      if (id) {} else { if (id) { clearInterval(id); } }
+    `;
+    const diagnostics = runRule(noUnclearedTimersRule, code);
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0].message).toContain('only cleared conditionally');
+  });
+
+  it('accepts a non-block consequent branch (`if (id) clearInterval(id); else ...`)', () => {
+    const code = `
+      let id = setInterval(tick, 1000);
+      if (id) clearInterval(id); else other();
+    `;
+    expect(runRule(noUnclearedTimersRule, code)).toHaveLength(0);
+  });
+
+  it('accepts a non-block alternate when the guard is unrelated', () => {
+    const code = `
+      let id = setInterval(tick, 1000);
+      let ready = true;
+      if (ready) other(); else clearInterval(id);
+    `;
+    const diagnostics = runRule(noUnclearedTimersRule, code);
+    expect(diagnostics).toHaveLength(1);
+  });
+
+  it('keeps branch tracking when the rule defines its own ReturnStatement handler', () => {
+    const rule: RuleDefinition = {
+      id: 'test/branch-with-return-handler',
+      description: 'timers plus a rule-owned ReturnStatement visitor',
+      category: 'generic',
+      defaultSeverity: 'warn',
+      triggers: ['setInterval'],
+      create(context) {
+        const tracker = new ScopeTracker();
+        const visitor: RuleVisitor = {};
+        attachScopeListeners(tracker, visitor);
+
+        visitor.CallExpression = (node: any, parent: any) => {
+          const callee = node.callee;
+          if (!callee || callee.type !== 'Identifier') return;
+          if (callee.name === 'setInterval') {
+            const target = getAllocationTarget(parent);
+            if (target.name) tracker.addAllocation(target.name);
+          } else if (callee.name === 'clearInterval') {
+            const name = getExpressionName(node.arguments?.[0]);
+            if (name) tracker.addClearance(name);
+          }
+        };
+
+        // The rule's own handler for a node type attachScopeListeners used to
+        // wrap. Assigning it must not break branch tracking.
+        visitor.ReturnStatement = () => {};
+
+        visitor['Program:exit'] = () => {
+          for (const alloc of tracker.getAllocations()) {
+            if (!alloc.name || tracker.isCleared(alloc.name, alloc.scopeId)) continue;
+            const conditional = tracker.isOnlyConditionallyCleared(alloc.name, alloc.scopeId);
+            context.report({
+              ruleId: 'test/branch-with-return-handler',
+              message: conditional
+                ? `Resource '${alloc.name}' is only cleared conditionally.`
+                : `Resource '${alloc.name}' is not cleared.`,
+              line: 1,
+              column: 0,
+            });
+          }
+        };
+        return visitor;
+      },
+    };
+
+    // The clearance sits directly in the `else` branch as a ReturnStatement.
+    const code = `
+      function f() {
+        const id = setInterval(tick, 1000);
+        if (id) { tick(); } else return clearInterval(id);
+      }
+    `;
+    const diagnostics = runRule(rule, code);
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0].message).toContain('conditional');
   });
 });
 
