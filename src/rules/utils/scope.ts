@@ -107,6 +107,39 @@ const CLEARANCE_CALL_NAMES = new Set([
 ]);
 
 /**
+ * Method names that release their *receiver* (`sub.unsubscribe()`,
+ * `ws.close()`), used to locate a method-style clearance inside an expression.
+ * Matched against `callee.property` with the resource taken from
+ * `callee.object`, since `getExpressionName(callee)` yields `sub.unsubscribe`
+ * rather than the bare method name.
+ */
+const METHOD_CLEARANCE_NAMES = new Set([
+  'close',
+  'abort',
+  'disconnect',
+  'unsubscribe',
+  'off',
+  'removeEventListener',
+  'terminate',
+  'destroy',
+  'dispose',
+]);
+
+/**
+ * Node types whose subtree is a nested function body. A clearance written
+ * inside one does not run while an enclosing guard expression is evaluated,
+ * so `containsClearanceOf` never descends into them.
+ */
+const FUNCTION_BODY_NODE_TYPES = new Set([
+  'FunctionDeclaration',
+  'FunctionExpression',
+  'ArrowFunctionExpression',
+]);
+
+/** Upper bound on nodes visited by one `containsClearanceOf` search. */
+const CLEARANCE_SEARCH_BUDGET = 1000;
+
+/**
  * Member-expression names rooted at `this` denote state that belongs to a
  * single class instance, so they are only resolvable inside the class scope
  * that owns them.
@@ -275,17 +308,39 @@ export class ScopeTracker {
 
   /**
    * Returns true when `node`'s subtree contains a call that releases `name`
-   * (e.g. `id && clearInterval(id)`). Such an expression gates the clearance
-   * itself rather than merely guarding a block.
+   * (e.g. `id && clearInterval(id)` or `sub && sub.unsubscribe()`). Such an
+   * expression gates the clearance itself rather than merely guarding a block.
+   *
+   * Two call shapes count:
+   *  - function-style (`clearInterval(id)`): the callee name must be a known
+   *    clearance and `arguments[0]` must name the resource;
+   *  - method-style (`sub.unsubscribe()`, `ws?.close()`): the method must be a
+   *    known clearance method and the receiver (`callee.object`) must be the
+   *    resource itself.
+   *
+   * Nested function bodies are skipped — building a function value does not
+   * clear anything while the guard evaluates — and the search is bounded by a
+   * node budget so pathological expressions cannot stall the walk.
    */
-  private containsClearanceOf(node: any, name: string, depth = 0): boolean {
-    if (!node || typeof node !== 'object' || depth > 32) return false;
+  private containsClearanceOf(node: any, name: string, budget: { used: number } = { used: 0 }): boolean {
+    if (!node || typeof node !== 'object') return false;
+    if (budget.used++ >= CLEARANCE_SEARCH_BUDGET) return false;
 
     if (node.type === 'CallExpression') {
-      const callee = node.callee;
-      const calleeName = callee ? getExpressionName(callee) : null;
-      if (calleeName && CLEARANCE_CALL_NAMES.has(calleeName) && getExpressionName(node.arguments?.[0]) === name) {
-        return true;
+      // Optional chains (`sub?.unsubscribe()`, `(sub?.unsubscribe)?.()`) may
+      // wrap the real callee in a ChainExpression; unwrap before matching.
+      const rawCallee = node.callee;
+      const callee = rawCallee?.type === 'ChainExpression' ? rawCallee.expression : rawCallee;
+      if (callee && callee.type === 'MemberExpression' && !callee.computed) {
+        const method = callee.property?.type === 'Identifier' ? callee.property.name : null;
+        if (method && METHOD_CLEARANCE_NAMES.has(method) && getExpressionName(callee.object) === name) {
+          return true;
+        }
+      } else if (callee) {
+        const calleeName = getExpressionName(callee);
+        if (calleeName && CLEARANCE_CALL_NAMES.has(calleeName) && getExpressionName(node.arguments?.[0]) === name) {
+          return true;
+        }
       }
     }
 
@@ -295,10 +350,12 @@ export class ScopeTracker {
       if (!value || typeof value !== 'object') continue;
       if (Array.isArray(value)) {
         for (const item of value) {
-          if (this.containsClearanceOf(item, name, depth + 1)) return true;
+          if (!item || typeof item !== 'object' || FUNCTION_BODY_NODE_TYPES.has(item.type)) continue;
+          if (this.containsClearanceOf(item, name, budget)) return true;
         }
-      } else if (this.containsClearanceOf(value, name, depth + 1)) {
-        return true;
+      } else {
+        if (FUNCTION_BODY_NODE_TYPES.has(value.type)) continue;
+        if (this.containsClearanceOf(value, name, budget)) return true;
       }
     }
     return false;

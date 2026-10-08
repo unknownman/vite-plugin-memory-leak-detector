@@ -1,6 +1,10 @@
 import { describe, it, expect } from 'vitest';
 import { runRule } from '../utils.js';
 import { noUnclearedTimersRule } from '../../src/rules/generic/no-uncleared-timers.js';
+import { noUnsubscribedEventsRule } from '../../src/rules/generic/no-unsubscribed-events.js';
+import { noUnclosedWebsocketsRule } from '../../src/rules/generic/no-unclosed-websockets.js';
+import { noMissingAbortControllerRule } from '../../src/rules/generic/no-missing-abort-controller.js';
+import { noUnconnectedObserversRule } from '../../src/rules/generic/no-unconnected-observers.js';
 import { reactUseEffectCleanupRule } from '../../src/rules/react/react-useeffect-cleanup.js';
 
 /**
@@ -182,6 +186,102 @@ describe('Conditional guards - nesting and branch awareness', () => {
     const diagnostics = runRule(noUnclearedTimersRule, code);
     expect(diagnostics).toHaveLength(1);
     expect(diagnostics[0].message).toContain('only cleared conditionally');
+  });
+});
+
+describe('Method-style && clearances', () => {
+  it('treats `sub && sub.unsubscribe()` as an unconditional clearance', () => {
+    const code = `
+      const sub = emitter.subscribe(v => {});
+      sub && sub.unsubscribe();
+    `;
+    expect(runRule(noUnsubscribedEventsRule, code)).toHaveLength(0);
+  });
+
+  it('treats `ws && ws.close()` as an unconditional clearance', () => {
+    const code = `
+      const ws = new WebSocket(url);
+      ws && ws.close();
+    `;
+    expect(runRule(noUnclosedWebsocketsRule, code)).toHaveLength(0);
+  });
+
+  it('treats `ctrl && ctrl.abort()` as an unconditional clearance', () => {
+    const code = `
+      const ctrl = new AbortController();
+      ctrl && ctrl.abort();
+    `;
+    expect(runRule(noMissingAbortControllerRule, code)).toHaveLength(0);
+  });
+
+  it('treats `obs && obs.disconnect()` as an unconditional clearance', () => {
+    const code = `
+      const obs = new IntersectionObserver(cb);
+      obs && obs.disconnect();
+    `;
+    expect(runRule(noUnconnectedObserversRule, code)).toHaveLength(0);
+  });
+
+  it('treats `this.sub && this.sub.unsubscribe()` as an unconditional clearance', () => {
+    const code = `
+      class Widget {
+        sub = emitter.subscribe(v => {});
+        dispose() {
+          this.sub && this.sub.unsubscribe();
+        }
+      }
+    `;
+    expect(runRule(noUnsubscribedEventsRule, code)).toHaveLength(0);
+  });
+
+  it('handles optional calls: `sub && sub?.unsubscribe()`', () => {
+    const code = `
+      const sub = emitter.subscribe(v => {});
+      sub && sub?.unsubscribe();
+    `;
+    expect(runRule(noUnsubscribedEventsRule, code)).toHaveLength(0);
+  });
+
+  it('handles optional calls: `ws && ws.close?.()`', () => {
+    const code = `
+      const ws = new WebSocket(url);
+      ws && ws.close?.();
+    `;
+    expect(runRule(noUnclosedWebsocketsRule, code)).toHaveLength(0);
+  });
+
+  it('reports `ready && sub && sub.unsubscribe()` as conditional', () => {
+    const code = `
+      const sub = emitter.subscribe(v => {});
+      let ready = true;
+      ready && sub && sub.unsubscribe();
+    `;
+    const diagnostics = runRule(noUnsubscribedEventsRule, code);
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0].message).toContain('never unsubscribed');
+  });
+
+  it('reports `other && sub.unsubscribe()` as conditional', () => {
+    const code = `
+      const sub = emitter.subscribe(v => {});
+      let other = true;
+      other && sub.unsubscribe();
+    `;
+    const diagnostics = runRule(noUnsubscribedEventsRule, code);
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0].message).toContain('never unsubscribed');
+  });
+
+  it('does not treat a clearance inside a nested function as gating the guard', () => {
+    // The arrow only *creates* a function; nothing is unsubscribed while the
+    // guard evaluates, so this must not count as a self-guard clearance.
+    const code = `
+      const sub = emitter.subscribe(v => {});
+      sub && (() => sub.unsubscribe());
+    `;
+    const diagnostics = runRule(noUnsubscribedEventsRule, code);
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0].message).toContain('never unsubscribed');
   });
 });
 
